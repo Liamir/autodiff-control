@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="template",
+    name="rpa_control",
     version="0.1.0",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
@@ -16,5 +16,10 @@ setup(
         "ipykernel",
         "statsmodels",
         "fire",
+        "torch",
+        "torchdiffeq",
+        "gymnasium",
+        "stable-baselines3",
+        "pytest",
     ],
 )
