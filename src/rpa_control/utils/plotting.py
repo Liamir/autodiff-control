@@ -12,6 +12,9 @@ def plot_training_comparison(
     time_horizon,
     target_var_idx=None,
     target_value=None,
+    perturb_indices=None,
+    perturb_fold_change=2.0,
+    n_perturbations=10,
     figsize=(12, 8),
     filename='training_comparison'
 ):
@@ -24,6 +27,9 @@ def plot_training_comparison(
         time_horizon: Simulation time
         target_var_idx: Index of target variable (optional, for plotting target line)
         target_value: Target value for the target variable (optional)
+        perturb_indices: Indices of fixed_params to perturb (None = no perturbation)
+        perturb_fold_change: Fold change for perturbations (params multiplied by random factor in [1/fold, fold])
+        n_perturbations: Number of perturbed trajectories to plot
         figsize: Figure size
         filename: Filename for saving the plot
 
@@ -102,6 +108,46 @@ def plot_training_comparison(
                              label='target', alpha=0.5)
     plt.close(fig_after)
 
+    # Add perturbed trajectories to show robustness (always shown, even if training didn't use perturbations)
+    if perturb_indices is not None and len(perturb_indices) > 0 and hasattr(ode_final, 'fixed_params') and ode_final.fixed_params is not None:
+        # Save original fixed params
+        original_fixed_params = ode_final.fixed_params.clone()
+
+        for _ in range(n_perturbations):
+            # Create perturbed version of fixed params
+            perturbed_fixed_params = ode_final.fixed_params.clone()
+
+            # Perturb specified parameters (same logic as training)
+            for idx in perturb_indices:
+                fold = perturb_fold_change
+                # Sample uniformly in log-space: log(1/fold) to log(fold)
+                log_factor = torch.rand(1).item() * 2 * torch.log(torch.tensor(fold)).item() - torch.log(torch.tensor(fold)).item()
+                random_factor = torch.exp(torch.tensor(log_factor)).item()
+                perturbed_fixed_params[idx] = perturbed_fixed_params[idx] * random_factor
+
+            # Temporarily set perturbed params
+            ode_final.fixed_params = perturbed_fixed_params
+
+            # Generate trajectory with perturbed params
+            fig_perturbed, axes_perturbed = plot_trajectory(ode_final, initial_state, time_horizon)
+
+            # Add to comparison plot as gray lines
+            for i, ax_perturbed in enumerate(axes_perturbed):
+                lines = ax_perturbed.get_lines()
+                for line in lines:
+                    axes[i, 1].plot(line.get_xdata(), line.get_ydata(),
+                                   color='gray', alpha=0.5, linewidth=0.8, zorder=1)
+            plt.close(fig_perturbed)
+
+        # Restore original fixed params
+        ode_final.fixed_params = original_fixed_params
+
+    # Remove top and right spines from all subplots
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
     plt.tight_layout()
     save_fig(fig, filename)
     print(f"saved trajectory comparison to plots/{filename}.pdf")
@@ -155,6 +201,12 @@ def plot_training_curves(history, figsize=(12, 8), filename='training_curves'):
 
     if has_l1 or has_l2:
         axes[1, 1].legend()
+
+    # Remove top and right spines from all subplots
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
 
     plt.tight_layout()
     save_fig(fig, filename)

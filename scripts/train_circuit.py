@@ -8,7 +8,7 @@ from rpa_control.utils.plotting import plot_training_comparison, plot_training_c
 from rpa_control.style import set_style
 
 
-def reward_fn(state):
+def reward_fn(state, time=None):
     """Reward function: drive B (second variable) to 1.0."""
     # state[1] is B
     target_b = 1.0
@@ -20,7 +20,7 @@ def train_ab_ode(
     learning_rate: float = 1e-2,
     l1_penalty: float = 0.0,
     l2_penalty: float = 0.0,
-    time_horizon: float = 10.0,
+    time_horizon: float = 20.0,
     log_interval: int = 10,
     save_plot: bool = True,
     steady_state_fraction: float = 0.5,
@@ -45,13 +45,13 @@ def train_ab_ode(
     set_style()
 
     # Create AB ODE with initial parameters
-    # alphas are differentiable, betas are fixed
-    initial_alphas = torch.tensor([1.0, 0.25, 0.25], requires_grad=True)
-    initial_betas = torch.tensor([1.0, 1.0])
+    # alpha1, alpha2, alpha3 are differentiable; beta1, beta2 are fixed
+    initial_alphas_diff = torch.tensor([1.0, -0.25, -0.25], requires_grad=True)  # alpha1, alpha2, alpha3
+    initial_fixed = torch.tensor([1.0, 1.0])  # beta1, beta2
 
     ode = AB(
-        differentiable_params=initial_alphas,
-        fixed_params=initial_betas,
+        differentiable_params=initial_alphas_diff,
+        fixed_params=initial_fixed,
     )
 
     # Create environment
@@ -65,7 +65,7 @@ def train_ab_ode(
     )
 
     # Training configuration
-    # For AB ODE: beta1 is at index 0, beta2 is at index 1
+    # For AB ODE with fixed_params=[beta1, beta2]: beta1 is at index 0, beta2 is at index 1
     perturb_indices = [0, 1] if perturb_betas else None
 
     config = TrainingConfig(
@@ -81,7 +81,8 @@ def train_ab_ode(
     )
 
     print("starting training...")
-    print(f"initial alphas: [1.000, 0.250, 0.250]")
+    print(f"initial differentiable params (alpha1, alpha2, alpha3): [1.000, -0.250, -0.250]")
+    print(f"fixed params (beta1, beta2): [1.000, 1.000]")
     if perturb_betas:
         print(f"perturbations enabled: beta params will be randomly perturbed by {perturb_fold_change}x each iteration")
     print()
@@ -97,15 +98,23 @@ def train_ab_ode(
     print("training complete!")
     print(f"final loss: {history['loss'][-1]:.3f}")
     print(f"final reward: {history['reward'][-1]:.3f}")
+    print(f"best reward: {history['best_reward']:.3f}")
     print(f"non-zero params: {history['num_nonzero_params'][-1]}")
+
+    # Format best parameters
+    best_params_str = "[" + ", ".join([f"{p.item():.3f}" for p in history['best_params']]) + "]"
+    print(f"best params: {best_params_str}")
+    print()
+    print("Note: ODE parameters have been restored to best (not final iteration)")
 
     # Create ODE with initial parameters for comparison
     ode_initial = AB(
-        differentiable_params=torch.tensor([1.0, 0.25, 0.25]),
-        fixed_params=initial_betas,
+        differentiable_params=torch.tensor([1.0, -0.25, -0.25]),
+        fixed_params=initial_fixed,
     )
 
     # Plot trajectory comparison and training curves
+    # Note: ode now contains best parameters (restored in train_ode_parameters)
     if save_plot:
         plot_training_comparison(
             ode_initial=ode_initial,
@@ -114,6 +123,8 @@ def train_ab_ode(
             time_horizon=time_horizon,
             target_var_idx=1,  # B is the second variable
             target_value=1.0,
+            perturb_indices=[0, 1],  # Always show perturbations to beta1, beta2
+            perturb_fold_change=perturb_fold_change,
             filename='circuit_trajectories'
         )
 

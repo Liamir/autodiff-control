@@ -60,18 +60,19 @@ def train_ode_parameters(
         'num_nonzero_params': [],
     }
 
+    # Track best parameters
+    best_reward = float('-inf')
+    best_params = params.clone().detach()
+
     for iteration in range(config.n_iterations):
         optimizer.zero_grad()
-
-        # Update ODE parameters in environment (important for gradient flow)
-        env.initial_ode.differentiable_params = params
 
         # Reset environment
         obs, info = env.reset()
         current_ode, state = obs
 
-        # Update the current ODE's params to point to our tracked params (for gradient flow)
-        current_ode.differentiable_params = params
+        # Save original fixed params (since current_ode is the env's ODE, not a copy)
+        original_fixed_params = current_ode.fixed_params.clone() if hasattr(current_ode, 'fixed_params') and current_ode.fixed_params is not None else None
 
         # Apply perturbations to fixed parameters if requested
         perturbed_factors = None
@@ -97,6 +98,10 @@ def train_ode_parameters(
         time_horizon = env.time_horizon if hasattr(env, 'time_horizon') else 10.0
 
         obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
+
+        # Restore original fixed params (critical since no deepcopy!)
+        if original_fixed_params is not None:
+            current_ode.fixed_params = original_fixed_params
 
         # Apply steady state filtering if requested
         if config.steady_state_fraction > 0:
@@ -133,6 +138,12 @@ def train_ode_parameters(
         history['l2_penalty'].append(l2_reg.item() if torch.is_tensor(l2_reg) else l2_reg)
         history['num_nonzero_params'].append(num_nonzero)
 
+        # Update best parameters
+        current_reward = reward.item() if torch.is_tensor(reward) else reward
+        if current_reward > best_reward:
+            best_reward = current_reward
+            best_params = params.clone().detach()
+
         # Logging
         if config.verbose and (iteration % config.log_interval == 0 or iteration == config.n_iterations - 1):
             # Format parameters for display
@@ -162,5 +173,10 @@ def train_ode_parameters(
                 'ode': current_ode,
             }
             callback(iteration, metrics)
+
+    # Restore best parameters
+    params.data.copy_(best_params)
+    history['best_reward'] = best_reward
+    history['best_params'] = best_params
 
     return history
