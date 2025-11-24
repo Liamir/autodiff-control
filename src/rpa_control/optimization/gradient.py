@@ -16,6 +16,124 @@ class TrainingConfig:
     steady_state_fraction: float = 0.0  # Fraction of trajectory to skip before computing reward (0.0 = use all, 0.5 = use second half)
     perturb_param_indices: Optional[List[int]] = None  # Indices of fixed_params to perturb (None = no perturbation)
     perturb_fold_change: float = 2.0  # Perturb params by random factor in [1/fold, fold]
+    scale_aware_regularization: bool = False  # Use scale-aware regularization based on basis function magnitudes
+    reg_scale_update_interval: int = 0  # Update regularization scales every N iterations (0 = only compute once at start)
+
+
+def compute_basis_scales(ode, env) -> torch.Tensor:
+    """Compute scale factors for basis functions based on trajectory sampling.
+
+    This enables scale-aware regularization where parameters are penalized
+    proportional to the typical magnitude of their basis functions.
+
+    For example, if variable A ~ 1 and B ~ 100, then:
+    - Parameter multiplying A should have weight ~ 1
+    - Parameter multiplying B should have weight ~ 100
+    - Parameter multiplying B² should have weight ~ 10,000
+
+    Args:
+        ode: ODE with controller (ControlledODE instance)
+        env: Environment for simulation
+
+    Returns:
+        Tensor of shape (n_params,) with RMS scale for each basis function
+    """
+    if not hasattr(ode, 'controller'):
+        # No controller, return ones (no scaling)
+        if hasattr(ode, 'differentiable_params'):
+            return torch.ones(ode.differentiable_params.numel())
+        return torch.ones(1)
+
+    # Import basis function generator
+    from ..controllers.basis import polynomial_basis
+
+    # Reset environment and simulate trajectory
+    obs, info = env.reset()
+    current_ode, state = obs
+
+    # Run simulation to collect states
+    time_horizon = env.time_horizon if hasattr(env, 'time_horizon') else 10.0
+    obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
+
+    # Get trajectory states
+    times, states, _ = env.get_trajectory()
+
+    # Compute basis function values for each state
+    is_dynamic = hasattr(ode, 'is_dynamic') and ode.is_dynamic
+
+    if is_dynamic:
+        # Dynamic controller: separate scales for observed and manipulated params
+        observed_basis_values = []
+        manipulated_basis_values = []
+
+        for state_vec in states:
+            # Split state
+            base_state = state_vec[:ode.base_state_dim]
+            controller_state = state_vec[ode.base_state_dim:]
+
+            # Observed basis: Φ(X, C)
+            augmented_state = torch.cat([base_state, controller_state])
+            observed_basis = polynomial_basis(
+                augmented_state,
+                ode.controller.observed_order,
+                ode.controller.include_constant
+            )
+            observed_basis_values.append(observed_basis.detach())
+
+            # Manipulated basis: Ψ(C)
+            manipulated_basis = polynomial_basis(
+                controller_state,
+                ode.controller.manipulated_order,
+                ode.controller.include_constant
+            )
+            manipulated_basis_values.append(manipulated_basis.detach())
+
+        # Stack and compute RMS for each basis function
+        observed_basis_values = torch.stack(observed_basis_values)  # (n_timesteps, n_basis_obs)
+        manipulated_basis_values = torch.stack(manipulated_basis_values)  # (n_timesteps, n_basis_man)
+
+        observed_scales = torch.sqrt((observed_basis_values ** 2).mean(dim=0))
+        manipulated_scales = torch.sqrt((manipulated_basis_values ** 2).mean(dim=0))
+
+        # Flatten and concatenate (matching parameter order in ControlledODE)
+        # Order: [observed_params (n_controller_states, n_basis_obs), manipulated_params (n_control_vars, n_basis_man)]
+        n_controller_states = ode.controller.n_controller_states
+        n_control_vars = ode.controller.n_control_vars
+
+        # Repeat scales for each output dimension
+        observed_scales_flat = observed_scales.repeat(n_controller_states)
+        manipulated_scales_flat = manipulated_scales.repeat(n_control_vars)
+
+        scales = torch.cat([observed_scales_flat, manipulated_scales_flat])
+
+    else:
+        # Static controller: Φ(X) only
+        basis_values = []
+
+        for state_vec in states:
+            # Extract base state
+            base_state = ode.extract_base_state(state_vec) if hasattr(ode, 'extract_base_state') else state_vec
+
+            # Compute basis
+            basis = polynomial_basis(
+                base_state,
+                ode.controller.order,
+                ode.controller.include_constant
+            )
+            basis_values.append(basis.detach())
+
+        # Stack and compute RMS
+        basis_values = torch.stack(basis_values)  # (n_timesteps, n_basis)
+        basis_scales = torch.sqrt((basis_values ** 2).mean(dim=0))
+
+        # Repeat for each control output
+        n_control_vars = ode.controller.n_control_vars
+        scales = basis_scales.repeat(n_control_vars)
+
+    # Add small epsilon to avoid division by zero
+    scales = scales + 1e-8
+
+    return scales
 
 
 def train_ode_parameters(
@@ -66,6 +184,16 @@ def train_ode_parameters(
     # Track best parameters
     best_reward = float('-inf')
     best_params = params.clone().detach()
+
+    # Compute basis scales for scale-aware regularization
+    basis_scales = None
+    if config.scale_aware_regularization and (config.l1_penalty > 0 or config.l2_penalty > 0):
+        if config.verbose:
+            print("Computing basis function scales for scale-aware regularization...")
+        basis_scales = compute_basis_scales(ode, env)
+        if config.verbose:
+            print(f"Basis scales (RMS): min={basis_scales.min().item():.2e}, max={basis_scales.max().item():.2e}, mean={basis_scales.mean().item():.2e}")
+            print()
 
     for iteration in range(config.n_iterations):
         optimizer.zero_grad()
@@ -137,6 +265,15 @@ def train_ode_parameters(
             control_mean = torch.abs(controls).mean().item()
             control_rms = torch.sqrt((controls ** 2).mean()).item()
 
+        # Update basis scales periodically if requested
+        if (config.scale_aware_regularization and
+            config.reg_scale_update_interval > 0 and
+            iteration > 0 and
+            iteration % config.reg_scale_update_interval == 0):
+            basis_scales = compute_basis_scales(ode, env)
+            if config.verbose:
+                print(f"[Iteration {iteration}] Updated basis scales: min={basis_scales.min().item():.2e}, max={basis_scales.max().item():.2e}")
+
         # Compute loss: -reward + penalties
         loss = -reward
 
@@ -145,11 +282,21 @@ def train_ode_parameters(
         l2_reg = torch.tensor(0.0)
 
         if config.l1_penalty > 0:
-            l1_reg = torch.abs(params).sum()
+            if basis_scales is not None:
+                # Scale-aware regularization: penalize each param proportional to its basis function magnitude
+                l1_reg = (basis_scales * torch.abs(params.flatten())).sum()
+            else:
+                # Standard regularization
+                l1_reg = torch.abs(params).sum()
             loss = loss + config.l1_penalty * l1_reg
 
         if config.l2_penalty > 0:
-            l2_reg = (params ** 2).sum()
+            if basis_scales is not None:
+                # Scale-aware regularization: penalize each param proportional to its basis function magnitude
+                l2_reg = (basis_scales * (params.flatten() ** 2)).sum()
+            else:
+                # Standard regularization
+                l2_reg = (params ** 2).sum()
             loss = loss + config.l2_penalty * l2_reg
 
         # Backpropagation
