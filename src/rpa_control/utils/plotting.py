@@ -55,7 +55,9 @@ def plot_training_comparison(
         if params_init.dim() == 0:
             params_init_str = f"θ={params_init.item():.2f}"
         else:
-            params_init_str = "θ=[" + ", ".join([f"{p.item():.2f}" for p in params_init]) + "]"
+            # Flatten if multi-dimensional
+            params_init_flat = params_init.flatten()
+            params_init_str = "θ=[" + ", ".join([f"{p.item():.2f}" for p in params_init_flat]) + "]"
     else:
         params_init_str = ""
 
@@ -86,7 +88,9 @@ def plot_training_comparison(
         if params_final.dim() == 0:
             params_final_str = f"θ={params_final.item():.2f}"
         else:
-            params_final_str = "θ=[" + ", ".join([f"{p.item():.2f}" for p in params_final]) + "]"
+            # Flatten if multi-dimensional
+            params_final_flat = params_final.flatten()
+            params_final_str = "θ=[" + ", ".join([f"{p.item():.2f}" for p in params_final_flat]) + "]"
     else:
         params_final_str = ""
 

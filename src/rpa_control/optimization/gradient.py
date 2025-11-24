@@ -58,6 +58,9 @@ def train_ode_parameters(
         'l1_penalty': [],
         'l2_penalty': [],
         'num_nonzero_params': [],
+        'control_max': [],      # Max absolute control value
+        'control_mean': [],     # Mean absolute control value
+        'control_rms': [],      # RMS control value
     }
 
     # Track best parameters
@@ -109,6 +112,31 @@ def train_ode_parameters(
             start_idx = int(len(times) * config.steady_state_fraction)
             reward = rewards[start_idx:].sum()
 
+        # Compute control statistics (for ControlledODE only)
+        control_max, control_mean, control_rms = 0.0, 0.0, 0.0
+        if hasattr(current_ode, 'controller'):
+            # Get trajectory states
+            times, states, _ = env.get_trajectory()
+
+            # Compute control for each state
+            controls = []
+            for state_vec in states:
+                # Extract base state (in case of dynamic controller with augmented state)
+                if hasattr(current_ode, 'extract_base_state'):
+                    base_state = current_ode.extract_base_state(state_vec)
+                else:
+                    base_state = state_vec
+
+                # Compute control value
+                control = current_ode.controller(base_state)
+                controls.append(control.detach())
+
+            # Stack and compute statistics
+            controls = torch.stack(controls)
+            control_max = torch.abs(controls).max().item()
+            control_mean = torch.abs(controls).mean().item()
+            control_rms = torch.sqrt((controls ** 2).mean()).item()
+
         # Compute loss: -reward + penalties
         loss = -reward
 
@@ -137,6 +165,9 @@ def train_ode_parameters(
         history['l1_penalty'].append(l1_reg.item() if torch.is_tensor(l1_reg) else l1_reg)
         history['l2_penalty'].append(l2_reg.item() if torch.is_tensor(l2_reg) else l2_reg)
         history['num_nonzero_params'].append(num_nonzero)
+        history['control_max'].append(control_max)
+        history['control_mean'].append(control_mean)
+        history['control_rms'].append(control_rms)
 
         # Update best parameters
         current_reward = reward.item() if torch.is_tensor(reward) else reward
@@ -146,12 +177,14 @@ def train_ode_parameters(
 
         # Logging
         if config.verbose and (iteration % config.log_interval == 0 or iteration == config.n_iterations - 1):
-            # Format parameters for display
-            params_str = "[" + ", ".join([f"{p.item():.3f}" for p in params]) + "]"
+            # Format parameters for display (flatten if multi-dimensional)
+            params_flat = params.flatten()
+            params_str = "[" + ", ".join([f"{p.item():.3f}" for p in params_flat]) + "]"
             log_msg = (f"Iter {iteration:4d} | Loss: {loss.item():8.3f} | "
                       f"Reward: {history['reward'][-1]:8.3f} | "
                       f"L1: {history['l1_penalty'][-1]:6.3f} | "
                       f"Non-zero params: {num_nonzero:3d} | "
+                      f"Control (max/mean/rms): {control_max:.3f}/{control_mean:.3f}/{control_rms:.3f} | "
                       f"Params: {params_str}")
 
             # Add perturbed factors if perturbations are enabled
