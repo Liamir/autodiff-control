@@ -62,49 +62,49 @@ def compute_basis_scales(ode, env) -> torch.Tensor:
     is_dynamic = hasattr(ode, 'is_dynamic') and ode.is_dynamic
 
     if is_dynamic:
-        # Dynamic controller: separate scales for observed and manipulated params
-        observed_basis_values = []
-        manipulated_basis_values = []
+        # Dynamic controller: separate scales for observing and actuating params
+        observing_basis_values = []
+        actuating_basis_values = []
 
         for state_vec in states:
             # Split state
             base_state = state_vec[:ode.base_state_dim]
             controller_state = state_vec[ode.base_state_dim:]
 
-            # Observed basis: Φ(X, C)
+            # Observing basis: Φ(X, C)
             augmented_state = torch.cat([base_state, controller_state])
-            observed_basis = polynomial_basis(
+            observing_basis = polynomial_basis(
                 augmented_state,
-                ode.controller.observed_order,
+                ode.controller.observing_order,
                 ode.controller.include_constant
             )
-            observed_basis_values.append(observed_basis.detach())
+            observing_basis_values.append(observing_basis.detach())
 
-            # Manipulated basis: Ψ(C)
-            manipulated_basis = polynomial_basis(
+            # Actuating basis: Ψ(C)
+            actuating_basis = polynomial_basis(
                 controller_state,
-                ode.controller.manipulated_order,
+                ode.controller.actuating_order,
                 ode.controller.include_constant
             )
-            manipulated_basis_values.append(manipulated_basis.detach())
+            actuating_basis_values.append(actuating_basis.detach())
 
         # Stack and compute RMS for each basis function
-        observed_basis_values = torch.stack(observed_basis_values)  # (n_timesteps, n_basis_obs)
-        manipulated_basis_values = torch.stack(manipulated_basis_values)  # (n_timesteps, n_basis_man)
+        observing_basis_values = torch.stack(observing_basis_values)  # (n_timesteps, n_basis_obs)
+        actuating_basis_values = torch.stack(actuating_basis_values)  # (n_timesteps, n_basis_act)
 
-        observed_scales = torch.sqrt((observed_basis_values ** 2).mean(dim=0))
-        manipulated_scales = torch.sqrt((manipulated_basis_values ** 2).mean(dim=0))
+        observing_scales = torch.sqrt((observing_basis_values ** 2).mean(dim=0))
+        actuating_scales = torch.sqrt((actuating_basis_values ** 2).mean(dim=0))
 
         # Flatten and concatenate (matching parameter order in ControlledODE)
-        # Order: [observed_params (n_controller_states, n_basis_obs), manipulated_params (n_control_vars, n_basis_man)]
+        # Order: [observing_params (n_controller_states, n_basis_obs), actuating_params (n_control_vars, n_basis_act)]
         n_controller_states = ode.controller.n_controller_states
         n_control_vars = ode.controller.n_control_vars
 
         # Repeat scales for each output dimension
-        observed_scales_flat = observed_scales.repeat(n_controller_states)
-        manipulated_scales_flat = manipulated_scales.repeat(n_control_vars)
+        observing_scales_flat = observing_scales.repeat(n_controller_states)
+        actuating_scales_flat = actuating_scales.repeat(n_control_vars)
 
-        scales = torch.cat([observed_scales_flat, manipulated_scales_flat])
+        scales = torch.cat([observing_scales_flat, actuating_scales_flat])
 
     else:
         # Static controller: Φ(X) only
@@ -248,15 +248,22 @@ def train_ode_parameters(
 
             # Compute control for each state
             controls = []
-            for state_vec in states:
-                # Extract base state (in case of dynamic controller with augmented state)
-                if hasattr(current_ode, 'extract_base_state'):
-                    base_state = current_ode.extract_base_state(state_vec)
-                else:
-                    base_state = state_vec
+            is_dynamic = hasattr(current_ode.controller, 'output')  # Dynamic controllers have output() method
 
-                # Compute control value
-                control = current_ode.controller(base_state)
+            for state_vec in states:
+                if is_dynamic:
+                    # For dynamic controllers: extract controller state and call output()
+                    base_state_dim = current_ode.base_state_dim
+                    controller_state = state_vec[base_state_dim:]
+                    control = current_ode.controller.output(controller_state)
+                else:
+                    # For static controllers: call controller directly on base state
+                    if hasattr(current_ode, 'extract_base_state'):
+                        base_state = current_ode.extract_base_state(state_vec)
+                    else:
+                        base_state = state_vec
+                    control = current_ode.controller(base_state)
+
                 controls.append(control.detach())
 
             # Stack and compute statistics

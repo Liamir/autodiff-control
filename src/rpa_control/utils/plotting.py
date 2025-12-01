@@ -23,7 +23,7 @@ def plot_training_comparison(
     Args:
         ode_initial: ODE with initial parameters
         ode_final: ODE with final (trained) parameters
-        initial_state: Initial state for simulation
+        initial_state: Initial state for simulation (base state for uncontrolled, or augmented for controlled)
         time_horizon: Simulation time
         target_var_idx: Index of target variable (optional, for plotting target line)
         target_value: Target value for the target variable (optional)
@@ -36,8 +36,21 @@ def plot_training_comparison(
     Returns:
         fig, axes: Matplotlib figure and axes
     """
-    # Get number of state variables
-    n_vars = len(initial_state)
+    # Determine if we have a dynamic controlled ODE
+    is_final_dynamic = hasattr(ode_final, 'is_dynamic') and ode_final.is_dynamic
+
+    # For dynamic controllers, we need different initial states and only plot base state variables
+    if is_final_dynamic:
+        # initial_state should be the base state (for uncontrolled ODE)
+        base_initial_state = initial_state
+        # Get augmented initial state for controlled ODE
+        augmented_initial_state = ode_final.get_initial_state(base_initial_state)
+        n_vars = len(base_initial_state)  # Only plot base state variables
+    else:
+        # For static controllers or uncontrolled, use initial_state as-is
+        base_initial_state = initial_state
+        augmented_initial_state = initial_state
+        n_vars = len(initial_state)
 
     # Create subplots - one row per variable, two columns (before/after)
     fig, axes = plt.subplots(n_vars, 2, figsize=figsize)
@@ -46,8 +59,8 @@ def plot_training_comparison(
     if n_vars == 1:
         axes = axes.reshape(1, -1)
 
-    # Before training
-    fig_before, axes_before = plot_trajectory(ode_initial, initial_state, time_horizon)
+    # Before training (always use base initial state)
+    fig_before, axes_before = plot_trajectory(ode_initial, base_initial_state, time_horizon)
 
     # Format initial parameters
     if hasattr(ode_initial, 'differentiable_params') and ode_initial.differentiable_params is not None:
@@ -79,8 +92,8 @@ def plot_training_comparison(
                              label='target', alpha=0.5)
     plt.close(fig_before)
 
-    # After training
-    fig_after, axes_after = plot_trajectory(ode_final, initial_state, time_horizon)
+    # After training (use augmented state for dynamic controllers)
+    fig_after, axes_after = plot_trajectory(ode_final, augmented_initial_state, time_horizon)
 
     # Format final parameters
     if hasattr(ode_final, 'differentiable_params') and ode_final.differentiable_params is not None:
@@ -94,8 +107,9 @@ def plot_training_comparison(
     else:
         params_final_str = ""
 
-    # Copy plots to comparison figure
-    for i, ax_after in enumerate(axes_after):
+    # Copy plots to comparison figure (only base state variables for dynamic controllers)
+    for i in range(n_vars):
+        ax_after = axes_after[i]
         lines = ax_after.get_lines()
         for line in lines:
             axes[i, 1].plot(line.get_xdata(), line.get_ydata(), color='orange')
@@ -132,11 +146,12 @@ def plot_training_comparison(
             # Temporarily set perturbed params
             ode_final.fixed_params = perturbed_fixed_params
 
-            # Generate trajectory with perturbed params
-            fig_perturbed, axes_perturbed = plot_trajectory(ode_final, initial_state, time_horizon)
+            # Generate trajectory with perturbed params (use augmented state for dynamic)
+            fig_perturbed, axes_perturbed = plot_trajectory(ode_final, augmented_initial_state, time_horizon)
 
-            # Add to comparison plot as gray lines
-            for i, ax_perturbed in enumerate(axes_perturbed):
+            # Add to comparison plot as gray lines (only base state variables)
+            for i in range(n_vars):
+                ax_perturbed = axes_perturbed[i]
                 lines = ax_perturbed.get_lines()
                 for line in lines:
                     axes[i, 1].plot(line.get_xdata(), line.get_ydata(),

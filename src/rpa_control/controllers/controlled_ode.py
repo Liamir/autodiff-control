@@ -65,8 +65,8 @@ class ControlledODE(ODE):
             # For dynamic controller, we need to flatten params for the ODE base class
             # but store references to original structured params
             differentiable_params = torch.cat([
-                controller.observed_params.flatten(),
-                controller.manipulated_params.flatten()
+                controller.observing_params.flatten(),
+                controller.actuating_params.flatten()
             ]).clone().detach().requires_grad_(True)
         else:
             # State dimension is just base state
@@ -108,21 +108,21 @@ class ControlledODE(ODE):
             controller_state = state[self.base_state_dim:]
 
             # Reshape controller params from flat vector
-            dynamics_size = self.controller.observed_params.numel()
-            observed_params = differentiable_params[:dynamics_size].reshape(self.controller.observed_params.shape)
-            manipulated_params = differentiable_params[dynamics_size:].reshape(self.controller.manipulated_params.shape)
+            dynamics_size = self.controller.observing_params.numel()
+            observing_params = differentiable_params[:dynamics_size].reshape(self.controller.observing_params.shape)
+            actuating_params = differentiable_params[dynamics_size:].reshape(self.controller.actuating_params.shape)
 
             # Compute base ODE dynamics
             base_derivative = self.base_ode(t, base_state, None, fixed_params)
 
-            # Compute controller output (manipulated): u = θ_man · Ψ(C)
-            output_basis = polynomial_basis(controller_state, self.controller.manipulated_order, self.controller.include_constant)
-            control = torch.matmul(manipulated_params, output_basis)
+            # Compute controller output (actuating): u = θ_act · Ψ(C)
+            output_basis = polynomial_basis(controller_state, self.controller.actuating_order, self.controller.include_constant)
+            control = torch.matmul(actuating_params, output_basis)
 
-            # Compute controller dynamics (observed): dC/dt = θ_obs · Φ(X, C)
+            # Compute controller dynamics (observing): dC/dt = θ_obs · Φ(X, C)
             augmented_state = torch.cat([base_state, controller_state])
-            dynamics_basis = polynomial_basis(augmented_state, self.controller.observed_order, self.controller.include_constant)
-            controller_derivative = torch.matmul(observed_params, dynamics_basis)
+            dynamics_basis = polynomial_basis(augmented_state, self.controller.observing_order, self.controller.include_constant)
+            controller_derivative = torch.matmul(observing_params, dynamics_basis)
 
             # Add control to specified state variables
             for i, control_idx in enumerate(self.control_indices):
@@ -186,15 +186,15 @@ class ControlledODE(ODE):
         """
         if self.is_dynamic:
             # Split differentiable_params back into dynamics and output params
-            dynamics_size = self.controller.observed_params.numel()
-            output_size = self.controller.manipulated_params.numel()
+            dynamics_size = self.controller.observing_params.numel()
+            output_size = self.controller.actuating_params.numel()
 
             dynamics_flat = self.differentiable_params[:dynamics_size]
             output_flat = self.differentiable_params[dynamics_size:dynamics_size + output_size]
 
             # Reshape and update (maintaining gradient connection)
-            self.controller.observed_params = dynamics_flat.reshape(self.controller.observed_params.shape)
-            self.controller.manipulated_params = output_flat.reshape(self.controller.manipulated_params.shape)
+            self.controller.observing_params = dynamics_flat.reshape(self.controller.observing_params.shape)
+            self.controller.actuating_params = output_flat.reshape(self.controller.actuating_params.shape)
         else:
             # Reshape flat params back to controller params
             self.controller.params = self.differentiable_params.reshape(self.controller.params.shape)
