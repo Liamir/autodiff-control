@@ -16,8 +16,8 @@ class TrainingConfig:
     steady_state_fraction: float = 0.0  # Fraction of trajectory to skip before computing reward (0.0 = use all, 0.5 = use second half)
     perturb_param_indices: Optional[List[int]] = None  # Indices of fixed_params to perturb (None = no perturbation)
     perturb_fold_change: float = 2.0  # Perturb params by random factor in [1/fold, fold]
-    scale_aware_regularization: bool = False  # Use scale-aware regularization based on basis function magnitudes
-    reg_scale_update_interval: int = 0  # Update regularization scales every N iterations (0 = only compute once at start)
+    scale_aware_regularization: bool = False  # Normalize basis functions by their RMS for numerical stability
+    reg_scale_update_interval: int = 0  # Update basis scales every N iterations (0 = only compute once at start)
     # Three-stage training pipeline (improved alternative to iterative LS)
     use_three_stage: bool = False  # Enable 3-stage: normal → L1 regularization → thresholding
     n_iterations_stage1: int = 1000  # Stage 1: normal training without regularization
@@ -164,7 +164,8 @@ def _train_single_round(
     param_mask: Optional[torch.Tensor] = None,
     phase_name: str = "train",
     callback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
-) -> Tuple[Dict[str, List[float]], float, torch.Tensor]:
+    track_lowest_l1: bool = False,
+) -> Tuple[Dict[str, List[float]], float, torch.Tensor, Optional[torch.Tensor]]:
     """Execute a single training round of n_iterations.
 
     Args:
@@ -177,11 +178,13 @@ def _train_single_round(
         param_mask: Optional mask for parameters (1=active, 0=frozen)
         phase_name: Name for logging (e.g., "train", "round1", "round2")
         callback: Optional callback function
+        track_lowest_l1: If True, also track parameters with lowest L1 norm
 
     Returns:
         history: Dictionary of training metrics
         best_reward: Best reward achieved in this round
         best_params: Best parameters from this round
+        lowest_l1_params: Parameters with lowest L1 norm (or None if not tracked)
     """
     history = {
         'loss': [],
@@ -196,6 +199,10 @@ def _train_single_round(
 
     best_reward = float('-inf')
     best_params = params.clone().detach()
+
+    # Track lowest L1 norm parameters if requested (useful for stage 2)
+    lowest_l1_norm = float('inf')
+    lowest_l1_params = None if not track_lowest_l1 else params.clone().detach()
 
     for iteration in range(config.n_iterations):
         optimizer.zero_grad()
@@ -279,6 +286,13 @@ def _train_single_round(
             best_reward = current_reward
             best_params = params.clone().detach()
 
+        # Track lowest L1 norm parameters if requested
+        if track_lowest_l1:
+            current_l1_norm = torch.abs(params).sum().item()
+            if current_l1_norm < lowest_l1_norm:
+                lowest_l1_norm = current_l1_norm
+                lowest_l1_params = params.clone().detach()
+
         # Backpropagation
         loss.backward()
 
@@ -334,7 +348,7 @@ def _train_single_round(
             }
             callback(iteration, metrics)
 
-    return history, best_reward, best_params
+    return history, best_reward, best_params, lowest_l1_params
 
 
 def train_ode_parameters(
@@ -374,11 +388,11 @@ def train_ode_parameters(
     if optimizer is None:
         optimizer = torch.optim.Adam([params], lr=config.learning_rate)
 
-    # Compute basis scales for scale-aware regularization
+    # Compute basis scales for basis normalization
     basis_scales = None
-    if config.scale_aware_regularization and (config.l1_penalty > 0 or config.l2_penalty > 0 or config.use_three_stage):
+    if config.scale_aware_regularization:
         if config.verbose:
-            print("Computing basis function scales for scale-aware regularization...")
+            print("Computing basis function scales for basis normalization...")
         basis_scales = compute_basis_scales(ode, env)
         if config.verbose:
             print(f"Basis scales (RMS): min={basis_scales.min().item():.2e}, max={basis_scales.max().item():.2e}, mean={basis_scales.mean().item():.2e}")
@@ -420,7 +434,7 @@ def train_ode_parameters(
             reg_scale_update_interval=config.reg_scale_update_interval,
         )
 
-        history, best_reward, best_params = _train_single_round(
+        history, best_reward, best_params, _ = _train_single_round(
             env=env,
             ode=ode,
             params=params,
@@ -470,7 +484,7 @@ def train_ode_parameters(
             reg_scale_update_interval=config.reg_scale_update_interval,
         )
 
-        stage2_history, stage2_best_reward, stage2_best_params = _train_single_round(
+        stage2_history, stage2_best_reward, stage2_best_params, stage2_lowest_l1_params = _train_single_round(
             env=env,
             ode=ode,
             params=params,
@@ -479,7 +493,8 @@ def train_ode_parameters(
             basis_scales=basis_scales,
             param_mask=None,
             phase_name="stage2",
-            callback=callback
+            callback=callback,
+            track_lowest_l1=True
         )
 
         # Append stage 2 history
@@ -487,9 +502,9 @@ def train_ode_parameters(
             if key not in ['best_reward', 'best_params']:
                 history[key].extend(stage2_history[key])
 
-        # For stage 2, we use FINAL parameters (not best), since L1 shrinks params over time
-        # We want the shrunken parameters for thresholding, even if they have worse reward
-        stage2_final_params = params.clone().detach()
+        # For stage 2, use parameters with LOWEST L1 NORM for thresholding
+        # This gives us the sparsest parameters that still worked reasonably well
+        stage2_sparsest_params = stage2_lowest_l1_params
 
         # Sync parameters to controller if needed
         if hasattr(ode, 'update_controller_params'):
@@ -500,10 +515,11 @@ def train_ode_parameters(
             print(f"Stage 2 complete")
             print(f"  Best reward during stage 2: {stage2_best_reward:.3f}")
             print(f"  Final reward: {history['reward'][-1]:.3f}")
-            params_str = "[" + ", ".join([f"{p.item():.3f}" for p in stage2_final_params.flatten()]) + "]"
-            print(f"  Final parameters (used for thresholding): {params_str}")
-            num_small = (torch.abs(stage2_final_params) < config.threshold_value_stage3).sum().item()
-            print(f"  Parameters below threshold ({config.threshold_value_stage3:.1e}): {num_small}/{stage2_final_params.numel()}")
+            sparsest_l1 = torch.abs(stage2_sparsest_params).sum().item()
+            params_str = "[" + ", ".join([f"{p.item():.3f}" for p in stage2_sparsest_params.flatten()]) + "]"
+            print(f"  Sparsest parameters (L1={sparsest_l1:.3f}, used for thresholding): {params_str}")
+            num_small = (torch.abs(stage2_sparsest_params) < config.threshold_value_stage3).sum().item()
+            print(f"  Parameters below threshold ({config.threshold_value_stage3:.1e}): {num_small}/{stage2_sparsest_params.numel()}")
             print()
 
         # ===== Stage 3: Thresholding (continued training) =====
@@ -512,15 +528,15 @@ def train_ode_parameters(
             print(f"STAGE 3: Thresholding (threshold={config.threshold_value_stage3:.1e})")
             print(f"{'='*60}")
 
-        # Apply threshold to stage 2 final params
-        threshold_mask = torch.abs(stage2_final_params) >= config.threshold_value_stage3
+        # Apply threshold to stage 2 sparsest params (lowest L1 norm)
+        threshold_mask = torch.abs(stage2_sparsest_params) >= config.threshold_value_stage3
         num_nonzero = threshold_mask.sum().item()
 
         if config.verbose:
-            print(f"Applied threshold: {num_nonzero}/{stage2_final_params.numel()} parameters remain")
+            print(f"Applied threshold: {num_nonzero}/{stage2_sparsest_params.numel()} parameters remain")
 
-        # Set small parameters to zero (using stage 2 final params)
-        params.data.copy_(stage2_final_params)
+        # Set small parameters to zero (using stage 2 sparsest params)
+        params.data.copy_(stage2_sparsest_params)
         params.data = params.data * threshold_mask.float()
 
         # Sync parameters to controller if needed
@@ -546,7 +562,7 @@ def train_ode_parameters(
                 reg_scale_update_interval=config.reg_scale_update_interval,
             )
 
-            stage3_history, stage3_best_reward, stage3_best_params = _train_single_round(
+            stage3_history, stage3_best_reward, stage3_best_params, _ = _train_single_round(
                 env=env,
                 ode=ode,
                 params=params,
@@ -600,13 +616,13 @@ def train_ode_parameters(
             print(f"Stage 1 best (dense): reward={best_reward:.3f}, params={best_params.numel()}")
             print(f"Stage 3 best (sparse): reward={stage3_best_reward_sparse:.3f}, params={(torch.abs(stage3_best_params_sparse) > 1e-6).sum().item()}/{stage3_best_params_sparse.numel()}")
             print()
-            print("Restoring Stage 1 best parameters (dense controller)")
+            print("Restoring Stage 3 best parameters (sparse controller)")
             print()
 
-        # Restore stage 1 best parameters (dense controller with best performance)
-        params.data.copy_(best_params)
-        best_reward = best_reward
-        best_params = best_params
+        # Restore stage 3 best parameters (sparse controller)
+        params.data.copy_(stage3_best_params_sparse)
+        best_reward = stage3_best_reward_sparse
+        best_params = stage3_best_params_sparse
 
     # ========== Initial training round (for iterative LS or default) ==========
     elif config.use_thresholding:
@@ -615,7 +631,7 @@ def train_ode_parameters(
             print(f"INITIAL TRAINING (before thresholding)")
             print(f"{'='*60}")
 
-        history, best_reward, best_params = _train_single_round(
+        history, best_reward, best_params, _ = _train_single_round(
             env=env,
             ode=ode,
             params=params,
@@ -629,7 +645,7 @@ def train_ode_parameters(
 
     # ========== Default: Single-stage training ==========
     else:
-        history, best_reward, best_params = _train_single_round(
+        history, best_reward, best_params, _ = _train_single_round(
             env=env,
             ode=ode,
             params=params,
@@ -693,7 +709,7 @@ def train_ode_parameters(
             if config.verbose:
                 print(f"Retraining with {num_nonzero} active parameters...")
 
-            round_history, round_best_reward, round_best_params = _train_single_round(
+            round_history, round_best_reward, round_best_params, _ = _train_single_round(
                 env=env,
                 ode=ode,
                 params=params,
