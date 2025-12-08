@@ -90,6 +90,12 @@ class DynamicController:
             assert len(initial_controller_state) == n_controller_states
             self.initial_controller_state = initial_controller_state
 
+        # Basis scales for normalization (set during training)
+        # Observing: Shape (n_basis_observing,) - RMS of Φ(X, C) over trajectory
+        # Actuating: Shape (n_basis_actuating,) - RMS of Ψ(C) over trajectory
+        self.observing_basis_scales_per_basis = None
+        self.actuating_basis_scales_per_basis = None
+
     def dynamics(self, state: torch.Tensor, controller_state: torch.Tensor) -> torch.Tensor:
         """Compute controller state derivative: dC/dt = g(X, C).
 
@@ -106,7 +112,11 @@ class DynamicController:
         # Compute basis functions over augmented state
         basis = polynomial_basis(augmented_state, self.observing_order, self.include_constant)
 
-        # dC/dt = Θ_g · Φ(X, C)
+        # Normalize observing basis if scales are available
+        if self.observing_basis_scales_per_basis is not None:
+            basis = basis / self.observing_basis_scales_per_basis
+
+        # dC/dt = Θ_g · Φ̃(X, C)
         dC_dt = torch.matmul(self.observing_params, basis)
 
         return dC_dt
@@ -123,7 +133,11 @@ class DynamicController:
         # Compute basis functions over controller state only
         basis = polynomial_basis(controller_state, self.actuating_order, self.include_constant)
 
-        # u = Θ_h · Ψ(C)
+        # Normalize actuating basis if scales are available
+        if self.actuating_basis_scales_per_basis is not None:
+            basis = basis / self.actuating_basis_scales_per_basis
+
+        # u = Θ_h · Ψ̃(C)
         control = torch.matmul(self.actuating_params, basis)
 
         return control
@@ -166,6 +180,17 @@ class DynamicController:
 
         controller_state_names = [f"C{i+1}" for i in range(self.n_controller_states)]
 
+        # Convert scaled parameters back to physical parameters for display
+        if self.observing_basis_scales_per_basis is not None:
+            physical_observing_params = self.observing_params / self.observing_basis_scales_per_basis
+        else:
+            physical_observing_params = self.observing_params
+
+        if self.actuating_basis_scales_per_basis is not None:
+            physical_actuating_params = self.actuating_params / self.actuating_basis_scales_per_basis
+        else:
+            physical_actuating_params = self.actuating_params
+
         # Get dynamics summary
         dynamics_basis_names = self.get_dynamics_basis_names(state_var_names)
         lines = ["Controller Dynamics:"]
@@ -173,7 +198,7 @@ class DynamicController:
         for i, c_name in enumerate(controller_state_names):
             terms = []
             for j, basis_name in enumerate(dynamics_basis_names):
-                param_val = self.observing_params[i, j].item()
+                param_val = physical_observing_params[i, j].item()
                 if abs(param_val) > threshold:
                     if basis_name == '1':
                         terms.append(f"{param_val:.3f}")
@@ -192,7 +217,7 @@ class DynamicController:
         for i, control_name in enumerate(control_names):
             terms = []
             for j, basis_name in enumerate(output_basis_names):
-                param_val = self.actuating_params[i, j].item()
+                param_val = physical_actuating_params[i, j].item()
                 if abs(param_val) > threshold:
                     if basis_name == '1':
                         terms.append(f"{param_val:.3f}")

@@ -117,11 +117,21 @@ class ControlledODE(ODE):
 
             # Compute controller output (actuating): u = θ_act · Ψ(C)
             output_basis = polynomial_basis(controller_state, self.controller.actuating_order, self.controller.include_constant)
+
+            # Normalize actuating basis if scales are available (Approach 1)
+            if self.controller.actuating_basis_scales_per_basis is not None:
+                output_basis = output_basis / self.controller.actuating_basis_scales_per_basis
+
             control = torch.matmul(actuating_params, output_basis)
 
             # Compute controller dynamics (observing): dC/dt = θ_obs · Φ(X, C)
             augmented_state = torch.cat([base_state, controller_state])
             dynamics_basis = polynomial_basis(augmented_state, self.controller.observing_order, self.controller.include_constant)
+
+            # Normalize observing basis if scales are available (Approach 1)
+            if self.controller.observing_basis_scales_per_basis is not None:
+                dynamics_basis = dynamics_basis / self.controller.observing_basis_scales_per_basis
+
             controller_derivative = torch.matmul(observing_params, dynamics_basis)
 
             # Add control to specified state variables
@@ -142,6 +152,11 @@ class ControlledODE(ODE):
 
             # Compute control (observed): u = θ_obs · Φ(X)
             basis = polynomial_basis(base_state, self.controller.order, self.controller.include_constant)
+
+            # Normalize basis if scales are available (Approach 1)
+            if self.controller.basis_scales_per_basis is not None:
+                basis = basis / self.controller.basis_scales_per_basis
+
             control = torch.matmul(differentiable_params, basis)
 
             # Add control to specified state variables

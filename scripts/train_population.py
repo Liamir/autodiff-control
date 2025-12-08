@@ -26,20 +26,42 @@ def train_population_controller(
     save_plot: bool = True,
     steady_state_fraction: float = 0.5,
     controller_order: int = 2,
+    # Scale-aware regularization
+    scale_aware_regularization: bool = False,
+    # Three-stage training (improved approach)
+    use_three_stage: bool = False,
+    n_iterations_stage1: int = 500,
+    n_iterations_stage2: int = 300,
+    l1_penalty_stage2: float = 0.01,
+    n_iterations_stage3: int = 300,
+    threshold_value_stage3: float = 1e-3,
+    # Deprecated: Old iterative thresholding
+    use_thresholding: bool = False,
+    threshold_value: float = 1e-3,
+    max_threshold_rounds: int = 10,
 ):
     """
     Train static controller for population dynamics.
 
     Args:
-        n_iterations: Number of training iterations
+        n_iterations: Number of training iterations (for single-stage or old iterative LS)
         learning_rate: Learning rate for optimizer
-        l1_penalty: L1 regularization coefficient (for sparsity)
+        l1_penalty: L1 regularization coefficient (for single-stage training)
         l2_penalty: L2 regularization coefficient
         time_horizon: Simulation time horizon
         log_interval: Print progress every N iterations
         save_plot: Whether to save training curves
         steady_state_fraction: Fraction of trajectory to skip before computing reward
         controller_order: Polynomial order for controller basis functions
+        use_three_stage: Use 3-stage training: normal → L1 reg → thresholding
+        n_iterations_stage1: Iterations for stage 1 (normal training)
+        n_iterations_stage2: Iterations for stage 2 (L1 regularization)
+        l1_penalty_stage2: L1 penalty coefficient for stage 2
+        n_iterations_stage3: Iterations for stage 3 (thresholding)
+        threshold_value_stage3: Absolute threshold for stage 3 (|θ| < threshold → 0)
+        use_thresholding: DEPRECATED - Use iterative LS (replaced by use_three_stage)
+        threshold_value: DEPRECATED - Absolute threshold for iterative LS
+        max_threshold_rounds: DEPRECATED - Maximum number of threshold-retrain rounds
     """
     set_style()
 
@@ -85,12 +107,14 @@ def train_population_controller(
     print()
 
     # Create environment
+    # Add state_limits to handle instability gracefully during training
     env = DifferentiableEnv(
         initial_ode=controlled_ode,
         reward_fn=reward_fn,
         initial_state=initial_state,
         time_horizon=time_horizon,
         n_reward_steps=100,
+        state_limits=(0.0, 200.0),  # Tighter limits for more reasonable penalties
     )
 
     # Training configuration
@@ -102,6 +126,19 @@ def train_population_controller(
         log_interval=log_interval,
         verbose=True,
         steady_state_fraction=steady_state_fraction,
+        # Scale-aware regularization
+        scale_aware_regularization=scale_aware_regularization,
+        # Three-stage training
+        use_three_stage=use_three_stage,
+        n_iterations_stage1=n_iterations_stage1,
+        n_iterations_stage2=n_iterations_stage2,
+        l1_penalty_stage2=l1_penalty_stage2,
+        n_iterations_stage3=n_iterations_stage3,
+        threshold_value_stage3=threshold_value_stage3,
+        # Old iterative thresholding (deprecated)
+        use_thresholding=use_thresholding,
+        threshold_value=threshold_value,
+        max_threshold_rounds=max_threshold_rounds,
     )
 
     print("Starting training...")

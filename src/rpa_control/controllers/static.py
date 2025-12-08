@@ -53,6 +53,12 @@ class StaticController:
             if not self.params.requires_grad:
                 self.params.requires_grad = True
 
+        # Basis scales for normalization (set during training)
+        # Shape: (n_basis,) - RMS of each basis function over a trajectory
+        # Used to normalize basis functions: Φ̃(x) = Φ(x) / scale
+        # This makes optimization numerically stable and allows uniform L1 penalty
+        self.basis_scales_per_basis = None
+
     def __call__(self, state: torch.Tensor) -> torch.Tensor:
         """Compute control input from state.
 
@@ -65,7 +71,14 @@ class StaticController:
         # Compute basis functions
         basis = polynomial_basis(state, self.order, self.include_constant)
 
-        # Control is linear combination: u = Θ·Φ(X)
+        # Normalize basis if scales are available (Approach 1)
+        # Φ̃(x) = Φ(x) / scale
+        # This makes u = β̃ · Φ̃(x) = (β̃ / scale) · Φ(x)
+        # where β̃ are the learned scaled parameters
+        if self.basis_scales_per_basis is not None:
+            basis = basis / self.basis_scales_per_basis
+
+        # Control is linear combination: u = Θ·Φ̃(X)
         # params: (n_control_vars, n_basis)
         # basis: (n_basis,)
         # output: (n_control_vars,)
@@ -100,11 +113,18 @@ class StaticController:
 
         basis_names = self.get_basis_names(var_names)
 
+        # Convert scaled parameters back to physical parameters for display
+        # Physical: β = β̃ / scale
+        if self.basis_scales_per_basis is not None:
+            physical_params = self.params / self.basis_scales_per_basis
+        else:
+            physical_params = self.params
+
         lines = []
         for i, control_name in enumerate(control_names):
             terms = []
             for j, basis_name in enumerate(basis_names):
-                param_val = self.params[i, j].item()
+                param_val = physical_params[i, j].item()
                 if abs(param_val) > threshold:
                     if basis_name == '1':
                         terms.append(f"{param_val:.3f}")
