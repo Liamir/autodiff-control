@@ -6,6 +6,7 @@ from rpasim.env.base import DifferentiableEnv
 from rpa_control.controllers import StaticController, ControlledODE
 from rpa_control.optimization.gradient import train_ode_parameters, TrainingConfig
 from rpa_control.utils.plotting import plot_training_comparison, plot_training_curves
+from rpa_control.utils import ExperimentLogger
 from rpa_control.style import set_style
 
 
@@ -65,6 +66,21 @@ def train_population_controller(
     """
     set_style()
 
+    # Create experiment logger
+    logger = ExperimentLogger(
+        log_dir="logs",
+        experiment_name="population_static"
+    )
+
+    # Start capturing console output
+    logger.start_capture()
+
+    print("="*60)
+    print(f"Experiment: {logger.experiment_name}")
+    print(f"Log directory: {logger.get_experiment_path()}")
+    print("="*60)
+    print()
+
     # Create population ODE
     pop_ode = PopulationDynamics()
     
@@ -106,12 +122,27 @@ def train_population_controller(
     print(f"Initial state: prey={initial_state[0]:.1f}, predator={initial_state[1]:.1f}")
     print()
 
+    # Fixed evaluation initial conditions matching NARROW range [60-140, 10-30]
+    # Using the 4 corners + critical point for comprehensive coverage
+    eval_initial_states = [
+        torch.tensor([60.0, 10.0]),   # min-min corner
+        torch.tensor([60.0, 30.0]),   # min-max corner
+        torch.tensor([140.0, 10.0]),  # max-min corner
+        torch.tensor([140.0, 30.0]),  # max-max corner
+        torch.tensor([100.0, 20.0]),  # Critical point (center)
+    ]
+    print(f"Evaluation: {len(eval_initial_states)} fixed initial conditions")
+    print()
+
     # Create environment
     # Add state_limits to handle instability gracefully during training
+    # Use randomized initial conditions for robustness
+    # Using [60-140, 10-30] range to maintain prey > predator and avoid extreme oscillations
     env = DifferentiableEnv(
         initial_ode=controlled_ode,
         reward_fn=reward_fn,
-        initial_state=initial_state,
+        initial_state=initial_state,  # Used only for dimension inference
+        initial_state_range=[(60.0, 140.0), (10.0, 30.0)],  # Prey: [60, 140], Predator: [10, 30]
         time_horizon=time_horizon,
         n_reward_steps=100,
         state_limits=(0.0, 200.0),  # Tighter limits for more reasonable penalties
@@ -128,6 +159,9 @@ def train_population_controller(
         steady_state_fraction=steady_state_fraction,
         # Scale-aware regularization
         scale_aware_regularization=scale_aware_regularization,
+        # Evaluation on fixed initial conditions
+        eval_interval=log_interval,  # Evaluate at same frequency as logging
+        eval_initial_states=eval_initial_states,
         # Three-stage training
         use_three_stage=use_three_stage,
         n_iterations_stage1=n_iterations_stage1,
@@ -140,6 +174,35 @@ def train_population_controller(
         threshold_value=threshold_value,
         max_threshold_rounds=max_threshold_rounds,
     )
+
+    # Log configuration
+    config_dict = {
+        'experiment_type': 'population_static',
+        'controller_type': 'static',
+        'controller_order': controller_order,
+        'n_iterations': n_iterations,
+        'learning_rate': learning_rate,
+        'l1_penalty': l1_penalty,
+        'l2_penalty': l2_penalty,
+        'time_horizon': time_horizon,
+        'steady_state_fraction': steady_state_fraction,
+        'scale_aware_regularization': scale_aware_regularization,
+        'use_three_stage': use_three_stage,
+        'n_iterations_stage1': n_iterations_stage1,
+        'n_iterations_stage2': n_iterations_stage2,
+        'l1_penalty_stage2': l1_penalty_stage2,
+        'n_iterations_stage3': n_iterations_stage3,
+        'threshold_value_stage3': threshold_value_stage3,
+        'use_thresholding': use_thresholding,
+        'threshold_value': threshold_value,
+        'max_threshold_rounds': max_threshold_rounds,
+        'initial_state': initial_state.tolist(),
+        'initial_state_range': [[60.0, 140.0], [10.0, 30.0]],  # Randomized ICs: Prey [60-140], Predator [10-30]
+        'eval_initial_states': [ic.tolist() for ic in eval_initial_states],  # Fixed ICs for evaluation
+        'critical_point': critical_point.tolist(),
+        'control_indices': [1],
+    }
+    logger.log_config(config_dict)
 
     print("Starting training...")
     print(f"Time horizon: {time_horizon}")
@@ -170,14 +233,32 @@ def train_population_controller(
     # Print controller summary
     print("Trained Controller:")
     print("-"*60)
-    print(controlled_ode.get_controller_summary(['prey', 'predator'], ['u']))
+    controller_summary = controlled_ode.get_controller_summary(['prey', 'predator'], ['u'])
+    print(controller_summary)
     print()
+
+    # Log results
+    logger.log_history(history)
+
+    summary = {
+        'final_loss': history['loss'][-1],
+        'final_reward': history['reward'][-1],
+        'best_reward': history['best_reward'],
+        'num_nonzero_params': history['num_nonzero_params'][-1],
+        'best_params': history['best_params'].tolist(),
+        'total_iterations': len(history['loss']),
+    }
+    logger.log_results(summary, controller_summary)
 
     # Create uncontrolled ODE for comparison
     uncontrolled_ode = PopulationDynamics()
 
     # Plot trajectory comparison and training curves
     if save_plot:
+        # Save plots to experiment log directory
+        plot_dir = logger.get_experiment_path()
+
+        # Plot trajectories from multiple random initial states sampled from training range
         plot_training_comparison(
             ode_initial=uncontrolled_ode,
             ode_final=controlled_ode,
@@ -185,15 +266,24 @@ def train_population_controller(
             time_horizon=time_horizon,
             target_var_idx=None,  # Show target for both variables
             target_value=None,
-            filename='population_trajectories'
+            initial_state_range=[(60.0, 140.0), (10.0, 30.0)],  # Sample from NARROW range
+            n_initial_states=5,
+            filename=str(plot_dir / 'trajectories')
         )
 
         plot_training_curves(
             history=history,
-            filename='population_training'
+            filename=str(plot_dir / 'training')
         )
 
     print("Note: Controller parameters have been restored to best (not final iteration)")
+    print()
+
+    # Stop logging and print location
+    logger.stop_capture()
+    print("="*60)
+    print(f"Experiment logs saved to: {logger.get_experiment_path()}")
+    print("="*60)
 
 
 if __name__ == "__main__":

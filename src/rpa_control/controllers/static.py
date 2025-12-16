@@ -106,7 +106,7 @@ class StaticController:
             threshold: Parameters below this absolute value are considered zero
 
         Returns:
-            String summary of non-zero parameters
+            String summary with both full and simplified controller equations
         """
         if control_names is None:
             control_names = [f"u{i+1}" for i in range(self.n_control_vars)]
@@ -121,6 +121,21 @@ class StaticController:
             physical_params = self.params
 
         lines = []
+
+        # Full controller (all parameters) - show 6 decimals to see small values
+        lines.append("Full Controller (all parameters):")
+        for i, control_name in enumerate(control_names):
+            terms = []
+            for j, basis_name in enumerate(basis_names):
+                param_val = physical_params[i, j].item()
+                if basis_name == '1':
+                    terms.append(f"{param_val:.6f}")
+                else:
+                    terms.append(f"{param_val:.6f}*{basis_name}")
+            lines.append(f"  {control_name} = {' + '.join(terms)}")
+
+        # Simplified controller (only significant parameters)
+        lines.append(f"\nSimplified Controller (|param| > {threshold}):")
         for i, control_name in enumerate(control_names):
             terms = []
             for j, basis_name in enumerate(basis_names):
@@ -132,8 +147,8 @@ class StaticController:
                         terms.append(f"{param_val:.3f}*{basis_name}")
 
             if terms:
-                lines.append(f"{control_name} = {' + '.join(terms)}")
+                lines.append(f"  {control_name} = {' + '.join(terms)}")
             else:
-                lines.append(f"{control_name} = 0")
+                lines.append(f"  {control_name} = 0")
 
         return '\n'.join(lines)

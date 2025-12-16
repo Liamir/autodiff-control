@@ -173,7 +173,7 @@ class DynamicController:
             threshold: Parameters below this absolute value are considered zero
 
         Returns:
-            String summary of controller dynamics and output
+            String summary with both full and simplified controller equations
         """
         if control_names is None:
             control_names = [f"u{i+1}" for i in range(self.n_control_vars)]
@@ -191,10 +191,38 @@ class DynamicController:
         else:
             physical_actuating_params = self.actuating_params
 
-        # Get dynamics summary
         dynamics_basis_names = self.get_dynamics_basis_names(state_var_names)
-        lines = ["Controller Dynamics:"]
+        output_basis_names = self.get_output_basis_names()
 
+        lines = []
+
+        # ===== FULL CONTROLLER (all parameters) - show 6 decimals to see small values =====
+        lines.append("Full Controller (all parameters):")
+        lines.append("  Dynamics:")
+        for i, c_name in enumerate(controller_state_names):
+            terms = []
+            for j, basis_name in enumerate(dynamics_basis_names):
+                param_val = physical_observing_params[i, j].item()
+                if basis_name == '1':
+                    terms.append(f"{param_val:.6f}")
+                else:
+                    terms.append(f"{param_val:.6f}*{basis_name}")
+            lines.append(f"    d{c_name}/dt = {' + '.join(terms)}")
+
+        lines.append("  Output:")
+        for i, control_name in enumerate(control_names):
+            terms = []
+            for j, basis_name in enumerate(output_basis_names):
+                param_val = physical_actuating_params[i, j].item()
+                if basis_name == '1':
+                    terms.append(f"{param_val:.6f}")
+                else:
+                    terms.append(f"{param_val:.6f}*{basis_name}")
+            lines.append(f"    {control_name} = {' + '.join(terms)}")
+
+        # ===== SIMPLIFIED CONTROLLER (only significant parameters) =====
+        lines.append(f"\nSimplified Controller (|param| > {threshold}):")
+        lines.append("  Dynamics:")
         for i, c_name in enumerate(controller_state_names):
             terms = []
             for j, basis_name in enumerate(dynamics_basis_names):
@@ -206,14 +234,11 @@ class DynamicController:
                         terms.append(f"{param_val:.3f}*{basis_name}")
 
             if terms:
-                lines.append(f"  d{c_name}/dt = {' + '.join(terms)}")
+                lines.append(f"    d{c_name}/dt = {' + '.join(terms)}")
             else:
-                lines.append(f"  d{c_name}/dt = 0")
+                lines.append(f"    d{c_name}/dt = 0")
 
-        # Get output summary
-        output_basis_names = self.get_output_basis_names()
-        lines.append("\nControl Output:")
-
+        lines.append("  Output:")
         for i, control_name in enumerate(control_names):
             terms = []
             for j, basis_name in enumerate(output_basis_names):
@@ -225,8 +250,8 @@ class DynamicController:
                         terms.append(f"{param_val:.3f}*{basis_name}")
 
             if terms:
-                lines.append(f"  {control_name} = {' + '.join(terms)}")
+                lines.append(f"    {control_name} = {' + '.join(terms)}")
             else:
-                lines.append(f"  {control_name} = 0")
+                lines.append(f"    {control_name} = 0")
 
         return '\n'.join(lines)

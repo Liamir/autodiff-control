@@ -6,6 +6,7 @@ from rpasim.env.base import DifferentiableEnv
 from rpa_control.controllers import DynamicController, ControlledODE
 from rpa_control.optimization.gradient import train_ode_parameters, TrainingConfig
 from rpa_control.utils.plotting import plot_training_comparison, plot_training_curves
+from rpa_control.utils import ExperimentLogger
 from rpa_control.style import set_style
 
 
@@ -34,6 +35,15 @@ def train_population_dynamic_controller(
     n_controller_states: int = 1,
     observing_order: int = 1,
     actuating_order: int = 1,
+    # Scale-aware regularization
+    scale_aware_regularization: bool = False,
+    # Three-stage training
+    use_three_stage: bool = False,
+    n_iterations_stage1: int = 500,
+    n_iterations_stage2: int = 300,
+    l1_penalty_stage2: float = 0.01,
+    n_iterations_stage3: int = 300,
+    threshold_value_stage3: float = 1e-3,
 ):
     """
     Train dynamic controller for population dynamics.
@@ -50,8 +60,30 @@ def train_population_dynamic_controller(
         n_controller_states: Number of internal controller state variables
         observing_order: Polynomial order for observing basis (dC/dt)
         actuating_order: Polynomial order for actuating basis (u)
+        scale_aware_regularization: Use basis normalization
+        use_three_stage: Use 3-stage training: normal → L1 reg → thresholding
+        n_iterations_stage1: Iterations for stage 1
+        n_iterations_stage2: Iterations for stage 2
+        l1_penalty_stage2: L1 penalty for stage 2
+        n_iterations_stage3: Iterations for stage 3
+        threshold_value_stage3: Threshold for stage 3
     """
     set_style()
+
+    # Create experiment logger
+    logger = ExperimentLogger(
+        log_dir="logs",
+        experiment_name="population_dynamic"
+    )
+
+    # Start capturing console output
+    logger.start_capture()
+
+    print("="*60)
+    print(f"Experiment: {logger.experiment_name}")
+    print(f"Log directory: {logger.get_experiment_path()}")
+    print("="*60)
+    print()
 
     # Create population ODE
     pop_ode = PopulationDynamics()
@@ -108,13 +140,37 @@ def train_population_dynamic_controller(
     print(f"  Controller: {controller_initial_state.tolist()}")
     print()
 
+    # Fixed evaluation initial conditions for base state matching NARROW range [60-140, 10-30]
+    # Using the 4 corners + critical point for comprehensive coverage
+    # For dynamic controllers, these will be augmented with controller states during evaluation
+    eval_base_initial_states = [
+        torch.tensor([60.0, 10.0]),   # min-min corner
+        torch.tensor([60.0, 30.0]),   # min-max corner
+        torch.tensor([140.0, 10.0]),  # max-min corner
+        torch.tensor([140.0, 30.0]),  # max-max corner
+        torch.tensor([100.0, 20.0]),  # Critical point (center)
+    ]
+    # Augment with controller states for evaluation
+    eval_initial_states = [
+        torch.cat([base_ic, torch.zeros(n_controller_states)])
+        for base_ic in eval_base_initial_states
+    ]
+    print(f"Evaluation: {len(eval_initial_states)} fixed initial conditions")
+    print()
+
     # Create environment
+    # Add state_limits to handle instability gracefully during training
+    # Use randomized initial conditions for robustness
+    # Using [60-140, 10-30] range for base state to maintain prey > predator and avoid extreme oscillations
+    # Controller states are always initialized to zero
     env = DifferentiableEnv(
         initial_ode=controlled_ode,
         reward_fn=reward_fn,
-        initial_state=initial_state,
+        initial_state=initial_state,  # Used only for dimension inference
+        initial_state_range=[(60.0, 140.0), (10.0, 30.0)] + [(0.0, 0.0)] * n_controller_states,  # Prey, Predator, Controller states
         time_horizon=time_horizon,
         n_reward_steps=100,
+        state_limits=(0.0, 200.0),  # Tighter limits for more reasonable penalties
     )
 
     # Training configuration
@@ -126,7 +182,43 @@ def train_population_dynamic_controller(
         log_interval=log_interval,
         verbose=True,
         steady_state_fraction=steady_state_fraction,
+        scale_aware_regularization=scale_aware_regularization,
+        use_three_stage=use_three_stage,
+        n_iterations_stage1=n_iterations_stage1,
+        n_iterations_stage2=n_iterations_stage2,
+        l1_penalty_stage2=l1_penalty_stage2,
+        n_iterations_stage3=n_iterations_stage3,
+        threshold_value_stage3=threshold_value_stage3,
     )
+
+    # Log configuration
+    config_dict = {
+        'experiment_type': 'population_dynamic',
+        'controller_type': 'dynamic',
+        'n_controller_states': n_controller_states,
+        'observing_order': observing_order,
+        'actuating_order': actuating_order,
+        'n_iterations': n_iterations,
+        'learning_rate': learning_rate,
+        'l1_penalty': l1_penalty,
+        'l2_penalty': l2_penalty,
+        'time_horizon': time_horizon,
+        'steady_state_fraction': steady_state_fraction,
+        'scale_aware_regularization': scale_aware_regularization,
+        'use_three_stage': use_three_stage,
+        'n_iterations_stage1': n_iterations_stage1,
+        'n_iterations_stage2': n_iterations_stage2,
+        'l1_penalty_stage2': l1_penalty_stage2,
+        'n_iterations_stage3': n_iterations_stage3,
+        'threshold_value_stage3': threshold_value_stage3,
+        'initial_state_base': base_initial_state.tolist(),
+        'initial_state_controller': controller_initial_state.tolist(),
+        'initial_state_range': [[60.0, 140.0], [10.0, 30.0]] + [[0.0, 0.0]] * n_controller_states,  # Prey, Predator, Controller states
+        'eval_initial_states': [ic.tolist() for ic in eval_initial_states],  # Fixed ICs for evaluation
+        'critical_point': critical_point.tolist(),
+        'control_indices': [1],
+    }
+    logger.log_config(config_dict)
 
     print("Starting training...")
     print(f"Time horizon: {time_horizon}")
@@ -159,15 +251,33 @@ def train_population_dynamic_controller(
     print("-"*60)
     # Note: get_controller_summary expects only base state variable names
     # (it will add controller state names internally)
-    print(controlled_ode.get_controller_summary(['prey', 'predator'], ['u']))
+    controller_summary = controlled_ode.get_controller_summary(['prey', 'predator'], ['u'])
+    print(controller_summary)
     print()
+
+    # Log results
+    logger.log_history(history)
+
+    summary = {
+        'final_loss': history['loss'][-1],
+        'final_reward': history['reward'][-1],
+        'best_reward': history['best_reward'],
+        'num_nonzero_params': history['num_nonzero_params'][-1],
+        'best_params': history['best_params'].tolist(),
+        'total_iterations': len(history['loss']),
+    }
+    logger.log_results(summary, controller_summary)
 
     # Create uncontrolled ODE for comparison
     uncontrolled_ode = PopulationDynamics()
 
     # Plot trajectory comparison and training curves
     if save_plot:
+        # Save plots to experiment log directory
+        plot_dir = logger.get_experiment_path()
+
         # Pass base initial state; plotting function will handle dynamic controllers automatically
+        # Plot trajectories from multiple random initial states sampled from training range
         plot_training_comparison(
             ode_initial=uncontrolled_ode,
             ode_final=controlled_ode,
@@ -175,15 +285,24 @@ def train_population_dynamic_controller(
             time_horizon=time_horizon,
             target_var_idx=None,
             target_value=None,
-            filename='population_dynamic_trajectories'
+            initial_state_range=[(60.0, 140.0), (10.0, 30.0)],  # Sample from NARROW range (base state only)
+            n_initial_states=5,
+            filename=str(plot_dir / 'trajectories')
         )
 
         plot_training_curves(
             history=history,
-            filename='population_dynamic_training'
+            filename=str(plot_dir / 'training')
         )
 
     print("Note: Controller parameters have been restored to best (not final iteration)")
+    print()
+
+    # Stop logging and print location
+    logger.stop_capture()
+    print("="*60)
+    print(f"Experiment logs saved to: {logger.get_experiment_path()}")
+    print("="*60)
 
 
 if __name__ == "__main__":

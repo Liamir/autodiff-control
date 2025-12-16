@@ -16,7 +16,9 @@ def plot_training_comparison(
     perturb_fold_change=2.0,
     n_perturbations=10,
     figsize=(12, 8),
-    filename='training_comparison'
+    filename='training_comparison',
+    initial_state_range=None,
+    n_initial_states=5,
 ):
     """Plot ODE trajectories before and after training.
 
@@ -32,6 +34,8 @@ def plot_training_comparison(
         n_perturbations: Number of perturbed trajectories to plot
         figsize: Figure size
         filename: Filename for saving the plot
+        initial_state_range: Range for sampling random initial states (tuple of (lower, upper))
+        n_initial_states: Number of random initial states to plot (only used if initial_state_range is provided)
 
     Returns:
         fig, axes: Matplotlib figure and axes
@@ -125,6 +129,49 @@ def plot_training_comparison(
             axes[i, 1].axhline(y=target_value, color='red', linestyle='--',
                              label='target', alpha=0.5)
     plt.close(fig_after)
+
+    # Add trajectories from multiple random initial states if range is provided
+    if initial_state_range is not None:
+        # Handle both single tuple (lower, upper) and list of tuples [(lower1, upper1), (lower2, upper2), ...]
+        if isinstance(initial_state_range, tuple):
+            # Single tuple: apply to all variables
+            lower = torch.tensor([initial_state_range[0]] * len(base_initial_state))
+            upper = torch.tensor([initial_state_range[1]] * len(base_initial_state))
+        else:
+            # List of tuples: one per variable
+            lower = torch.tensor([lim[0] for lim in initial_state_range])
+            upper = torch.tensor([lim[1] for lim in initial_state_range])
+
+        for _ in range(n_initial_states - 1):  # -1 because we already plotted one initial state
+            # Sample random initial state
+            random_factors = torch.rand_like(base_initial_state)
+            random_init_state = lower + random_factors * (upper - lower)
+
+            # For dynamic controllers, get augmented state
+            if is_final_dynamic:
+                random_augmented_state = ode_final.get_initial_state(random_init_state)
+            else:
+                random_augmented_state = random_init_state
+
+            # Plot uncontrolled trajectory
+            fig_rand_before, axes_rand_before = plot_trajectory(ode_initial, random_init_state, time_horizon)
+            for i in range(n_vars):
+                ax_rand_before = axes_rand_before[i]
+                lines = ax_rand_before.get_lines()
+                for line in lines:
+                    axes[i, 0].plot(line.get_xdata(), line.get_ydata(),
+                                   alpha=0.4, linewidth=1.0, zorder=1)
+            plt.close(fig_rand_before)
+
+            # Plot controlled trajectory
+            fig_rand_after, axes_rand_after = plot_trajectory(ode_final, random_augmented_state, time_horizon)
+            for i in range(n_vars):
+                ax_rand_after = axes_rand_after[i]
+                lines = ax_rand_after.get_lines()
+                for line in lines:
+                    axes[i, 1].plot(line.get_xdata(), line.get_ydata(),
+                                   color='orange', alpha=0.4, linewidth=1.0, zorder=1)
+            plt.close(fig_rand_after)
 
     # Add perturbed trajectories to show robustness (always shown, even if training didn't use perturbations)
     if perturb_indices is not None and len(perturb_indices) > 0 and hasattr(ode_final, 'fixed_params') and ode_final.fixed_params is not None:
