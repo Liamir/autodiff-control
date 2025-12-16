@@ -18,6 +18,15 @@ class TrainingConfig:
     perturb_fold_change: float = 2.0  # Perturb params by random factor in [1/fold, fold]
     scale_aware_regularization: bool = False  # Normalize basis functions by their RMS for numerical stability
     reg_scale_update_interval: int = 0  # Update basis scales every N iterations (0 = only compute once at start)
+    # Learning rate warmup
+    warmup_iterations: int = 0  # Number of iterations for LR warmup (0 = no warmup)
+    warmup_start_factor: float = 0.01  # Starting LR = learning_rate * warmup_start_factor
+    # Gradient clipping
+    gradient_clip_norm: float = 0.0  # Max gradient norm (0 = no clipping)
+    # Evaluation on fixed initial conditions
+    eval_interval: int = 0  # Evaluate every N iterations on fixed ICs (0 = no evaluation)
+    eval_initial_states: Optional[List[torch.Tensor]] = None  # Fixed ICs for evaluation (None = no evaluation)
+    n_param_samples_eval: int = 10  # Number of parameter samples per IC during evaluation (only used if perturb_param_indices is set)
     # Three-stage training pipeline (improved alternative to iterative LS)
     use_three_stage: bool = False  # Enable 3-stage: normal → L1 regularization → thresholding
     n_iterations_stage1: int = 1000  # Stage 1: normal training without regularization
@@ -154,6 +163,84 @@ def compute_basis_scales(ode, env) -> torch.Tensor:
     return scales
 
 
+def evaluate_controller(
+    env,
+    ode,
+    initial_states: List[torch.Tensor],
+    steady_state_fraction: float = 0.0,
+    perturb_param_indices: Optional[List[int]] = None,
+    perturb_fold_change: float = 2.0,
+    n_param_samples: int = 10,
+) -> float:
+    """Evaluate controller on multiple fixed initial conditions.
+
+    Args:
+        env: DifferentiableEnv (should have initial_state_bounds set to None for evaluation)
+        ode: ODE with controller to evaluate
+        initial_states: List of initial state tensors to evaluate on
+        steady_state_fraction: Fraction of trajectory to skip before computing reward
+        perturb_param_indices: Optional indices of fixed_params to perturb (if None, no perturbation)
+        perturb_fold_change: Fold change for parameter perturbations
+        n_param_samples: Number of parameter samples per initial condition (only used if perturb_param_indices is not None)
+
+    Returns:
+        Average reward across all initial conditions (and parameter samples if perturbations enabled)
+    """
+    total_reward = 0.0
+    n_evaluations = 0
+
+    # Temporarily disable randomization in env
+    original_bounds = env.initial_state_bounds
+    env.initial_state_bounds = None
+
+    # Save original fixed params
+    original_fixed_params = ode.fixed_params.clone() if hasattr(ode, 'fixed_params') and ode.fixed_params is not None else None
+
+    for init_state in initial_states:
+        # Determine how many parameter samples to use
+        n_samples = n_param_samples if (perturb_param_indices is not None and len(perturb_param_indices) > 0) else 1
+
+        for _ in range(n_samples):
+            # Apply parameter perturbations if requested
+            if perturb_param_indices is not None and len(perturb_param_indices) > 0 and original_fixed_params is not None:
+                perturbed_fixed_params = original_fixed_params.clone()
+                for idx in perturb_param_indices:
+                    fold = perturb_fold_change
+                    # Sample uniformly in log space: log(param * factor) where factor ∈ [1/fold, fold]
+                    log_factor = torch.rand(1).item() * 2 * torch.log(torch.tensor(fold)).item() - torch.log(torch.tensor(fold)).item()
+                    factor = torch.exp(torch.tensor(log_factor)).item()
+                    perturbed_fixed_params[idx] = original_fixed_params[idx] * factor
+                ode.fixed_params = perturbed_fixed_params
+
+            # Set env initial state
+            env.initial_state = init_state
+
+            # Reset and run
+            obs, info = env.reset()
+            current_ode, state = obs
+
+            time_horizon = env.time_horizon if hasattr(env, 'time_horizon') else 10.0
+            obs, reward, terminated, truncated, info = env.step((ode, time_horizon))
+
+            # Apply steady state filtering if requested
+            if steady_state_fraction > 0:
+                times, states, rewards = env.get_trajectory()
+                start_idx = int(len(times) * steady_state_fraction)
+                reward = rewards[start_idx:].sum()
+
+            total_reward += reward.item() if torch.is_tensor(reward) else reward
+            n_evaluations += 1
+
+    # Restore original params
+    if original_fixed_params is not None:
+        ode.fixed_params = original_fixed_params
+
+    # Restore original bounds
+    env.initial_state_bounds = original_bounds
+
+    return total_reward / n_evaluations
+
+
 def _train_single_round(
     env,
     ode,
@@ -195,14 +282,34 @@ def _train_single_round(
         'control_max': [],
         'control_mean': [],
         'control_rms': [],
+        'eval_reward': [],  # Evaluation on fixed ICs
     }
 
     best_reward = float('-inf')
+    best_eval_reward = float('-inf')  # Track best eval score
     best_params = params.clone().detach()
 
     # Track lowest L1 norm parameters if requested (useful for stage 2)
     lowest_l1_norm = float('inf')
     lowest_l1_params = None if not track_lowest_l1 else params.clone().detach()
+
+    # Check if evaluation is enabled
+    use_eval = (config.eval_interval > 0 and
+                config.eval_initial_states is not None and
+                len(config.eval_initial_states) > 0)
+
+    # Setup learning rate scheduler for warmup
+    scheduler = None
+    if config.warmup_iterations > 0:
+        def lr_lambda(iteration):
+            if iteration < config.warmup_iterations:
+                # Linear warmup from warmup_start_factor to 1.0
+                return config.warmup_start_factor + (1.0 - config.warmup_start_factor) * iteration / config.warmup_iterations
+            else:
+                # After warmup, keep at 1.0 (full learning rate)
+                return 1.0
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     for iteration in range(config.n_iterations):
         optimizer.zero_grad()
@@ -230,6 +337,15 @@ def _train_single_round(
         # Run simulation
         time_horizon = env.time_horizon if hasattr(env, 'time_horizon') else 10.0
         obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
+
+        # Debug: check forward pass on first iteration
+        if iteration == 0 and config.verbose:
+            times, states, rewards = env.get_trajectory()
+            state_has_nan = any(torch.isnan(s).any().item() for s in states)
+            state_has_inf = any(torch.isinf(s).any().item() for s in states)
+            state_max = max(torch.abs(s).max().item() for s in states)
+            reward_has_nan = torch.isnan(reward).any().item() if torch.is_tensor(reward) else False
+            print(f"[DEBUG] Iteration 0 forward pass: state_has_nan={state_has_nan}, state_has_inf={state_has_inf}, state_max={state_max:.2e}, reward_has_nan={reward_has_nan}, reward={reward}")
 
         # Restore original fixed params
         if original_fixed_params is not None:
@@ -279,12 +395,32 @@ def _train_single_round(
             l2_reg = (params ** 2).sum()
             loss = loss + config.l2_penalty * l2_reg
 
-        # Update best parameters BEFORE optimizer step
+        # Evaluate on fixed ICs if enabled
+        current_eval_reward = None
+        if use_eval and (iteration % config.eval_interval == 0 or iteration == config.n_iterations - 1):
+            # Run evaluation (with parameter perturbations if enabled in training)
+            current_eval_reward = evaluate_controller(
+                env, ode, config.eval_initial_states, config.steady_state_fraction,
+                perturb_param_indices=config.perturb_param_indices,
+                perturb_fold_change=config.perturb_fold_change,
+                n_param_samples=config.n_param_samples_eval,
+            )
+            # Update best params based on eval score
+            if current_eval_reward > best_eval_reward:
+                best_eval_reward = current_eval_reward
+                best_params = params.clone().detach()
+
+        # Update best parameters BEFORE optimizer step (based on single-iteration reward if no eval)
         # (reward was computed with current params, so we need to save these params, not the post-step params)
         current_reward = reward.item() if torch.is_tensor(reward) else reward
-        if current_reward > best_reward:
-            best_reward = current_reward
-            best_params = params.clone().detach()
+        if not use_eval:  # Only track single-iteration best if not using evaluation
+            if current_reward > best_reward:
+                best_reward = current_reward
+                best_params = params.clone().detach()
+        else:
+            # Still track single-iteration reward for logging
+            if current_reward > best_reward:
+                best_reward = current_reward
 
         # Track lowest L1 norm parameters if requested
         if track_lowest_l1:
@@ -296,11 +432,40 @@ def _train_single_round(
         # Backpropagation
         loss.backward()
 
+        # Debug: check gradients on first iteration
+        if iteration == 0 and config.verbose:
+            if params.grad is not None:
+                grad_has_nan = torch.isnan(params.grad).any().item()
+                grad_has_inf = torch.isinf(params.grad).any().item()
+                grad_max = torch.abs(params.grad).max().item()
+                grad_mean = torch.abs(params.grad).mean().item()
+                print(f"[DEBUG] Iteration 0 gradients (before clipping): has_nan={grad_has_nan}, has_inf={grad_has_inf}, max={grad_max:.2e}, mean={grad_mean:.2e}")
+                print(f"[DEBUG] Gradient values: {params.grad.flatten().tolist()}")
+            else:
+                print(f"[DEBUG] Iteration 0: params.grad is None")
+
+        # Gradient clipping (before applying mask)
+        if config.gradient_clip_norm > 0 and params.grad is not None:
+            torch.nn.utils.clip_grad_norm_([params], config.gradient_clip_norm)
+
+        # Debug: check gradients after clipping on first iteration
+        if iteration == 0 and config.verbose and config.gradient_clip_norm > 0:
+            if params.grad is not None:
+                grad_has_nan = torch.isnan(params.grad).any().item()
+                grad_has_inf = torch.isinf(params.grad).any().item()
+                grad_max = torch.abs(params.grad).max().item()
+                grad_mean = torch.abs(params.grad).mean().item()
+                print(f"[DEBUG] Iteration 0 gradients (after clipping): has_nan={grad_has_nan}, has_inf={grad_has_inf}, max={grad_max:.2e}, mean={grad_mean:.2e}")
+
         # Apply mask to gradients if provided
         if param_mask is not None and params.grad is not None:
             params.grad.data = params.grad.data * param_mask.float()
 
         optimizer.step()
+
+        # Update learning rate if warmup scheduler is active
+        if scheduler is not None:
+            scheduler.step()
 
         # Apply mask to parameters if provided
         if param_mask is not None:
@@ -318,6 +483,7 @@ def _train_single_round(
         history['control_max'].append(control_max)
         history['control_mean'].append(control_mean)
         history['control_rms'].append(control_rms)
+        history['eval_reward'].append(current_eval_reward if current_eval_reward is not None else float('nan'))
 
         # Logging
         if config.verbose and (iteration % config.log_interval == 0 or iteration == config.n_iterations - 1):
@@ -327,8 +493,15 @@ def _train_single_round(
                       f"Reward: {history['reward'][-1]:8.3f} | "
                       f"L1: {history['l1_penalty'][-1]:6.3f} | "
                       f"Non-zero params: {num_nonzero:3d} | "
-                      f"Control (max/mean/rms): {control_max:.3f}/{control_mean:.3f}/{control_rms:.3f} | "
-                      f"Params: {params_str}")
+                      f"Control (max/mean/rms): {control_max:.3f}/{control_mean:.3f}/{control_rms:.3f}")
+            # Add eval reward if available
+            if current_eval_reward is not None:
+                log_msg += f" | Eval: {current_eval_reward:8.3f}"
+            # Show current learning rate during warmup
+            if scheduler is not None and iteration < config.warmup_iterations:
+                current_lr = optimizer.param_groups[0]['lr']
+                log_msg += f" | LR: {current_lr:.2e}"
+            log_msg += f" | Params: {params_str}"
             if perturbed_factors is not None:
                 factors_str = "[" + ", ".join([f"{f:.2f}x" for f in perturbed_factors]) + "]"
                 log_msg += f" | β perturbations: {factors_str}"
@@ -348,7 +521,9 @@ def _train_single_round(
             }
             callback(iteration, metrics)
 
-    return history, best_reward, best_params, lowest_l1_params
+    # Return best eval reward if evaluation was used, otherwise return best single-iteration reward
+    final_best_reward = best_eval_reward if use_eval else best_reward
+    return history, final_best_reward, best_params, lowest_l1_params
 
 
 def train_ode_parameters(
