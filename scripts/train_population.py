@@ -40,6 +40,9 @@ def train_population_controller(
     use_thresholding: bool = False,
     threshold_value: float = 1e-3,
     max_threshold_rounds: int = 10,
+    # Parameter perturbations for robustness
+    perturb_params: bool = False,
+    perturb_fold_change: float = 2.0,
 ):
     """
     Train static controller for population dynamics.
@@ -63,6 +66,8 @@ def train_population_controller(
         use_thresholding: DEPRECATED - Use iterative LS (replaced by use_three_stage)
         threshold_value: DEPRECATED - Absolute threshold for iterative LS
         max_threshold_rounds: DEPRECATED - Maximum number of threshold-retrain rounds
+        perturb_params: Whether to perturb ODE parameters during training for robustness
+        perturb_fold_change: Fold change for parameter perturbations (params × random in [1/fold, fold])
     """
     set_style()
 
@@ -173,6 +178,9 @@ def train_population_controller(
         use_thresholding=use_thresholding,
         threshold_value=threshold_value,
         max_threshold_rounds=max_threshold_rounds,
+        # Parameter perturbations
+        perturb_param_indices=[0, 1, 2, 3] if perturb_params else None,  # Perturb all params [a, b, c, d]
+        perturb_fold_change=perturb_fold_change,
     )
 
     # Log configuration
@@ -196,6 +204,8 @@ def train_population_controller(
         'use_thresholding': use_thresholding,
         'threshold_value': threshold_value,
         'max_threshold_rounds': max_threshold_rounds,
+        'perturb_params': perturb_params,
+        'perturb_fold_change': perturb_fold_change,
         'initial_state': initial_state.tolist(),
         'initial_state_range': [[60.0, 140.0], [10.0, 30.0]],  # Randomized ICs: Prey [60-140], Predator [10-30]
         'eval_initial_states': [ic.tolist() for ic in eval_initial_states],  # Fixed ICs for evaluation
