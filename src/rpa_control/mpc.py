@@ -1,13 +1,11 @@
-"""Model Predictive Control (MPC) implementation for nonlinear ODEs.
+"""Nonlinear Model Predictive Control (NMPC) for ODE systems.
 
-Uses CasADi for efficient nonlinear optimization with automatic differentiation.
-Reference: https://web.casadi.org/
+Uses scipy.optimize with RK4 integration based on the SINDY-MPC paper approach.
 """
 import torch
 import numpy as np
-import casadi as ca
 from typing import Optional, Tuple
-from torchdiffeq import odeint
+from scipy.optimize import minimize
 
 
 class MPCConfig:
@@ -17,50 +15,46 @@ class MPCConfig:
         self,
         prediction_horizon: int = 10,
         dt: float = 0.1,
-        # Cost function weights
-        Q: Optional[torch.Tensor] = None,  # State tracking weight
-        R: Optional[torch.Tensor] = None,  # Control rate-of-change weight
-        Ru: Optional[torch.Tensor] = None,  # Control magnitude weight
-        # Control constraints
+        Q: Optional[torch.Tensor] = None,
+        Ru: Optional[float] = None,
+        R_deltau: Optional[float] = None,
         u_min: float = -20.0,
         u_max: float = 20.0,
-        # State constraints (optional)
         state_min: Optional[torch.Tensor] = None,
         state_max: Optional[torch.Tensor] = None,
-        # Optimization settings
-        max_iter: int = 100,
-        tol: float = 1e-6,
+        ftol: float = 1e-3,
+        disp: bool = False,
     ):
         """Initialize MPC configuration.
 
         Args:
-            prediction_horizon: Number of steps to predict ahead (N)
-            dt: Time step for discrete-time prediction
-            Q: State tracking weight matrix (n_states x n_states) or scalar
-            R: Control rate-of-change weight matrix (n_controls x n_controls) or scalar
-            Ru: Control magnitude weight matrix (n_controls x n_controls) or scalar
+            prediction_horizon: Number of steps to predict ahead
+            dt: Time step
+            Q: State tracking weight (diagonal of Q matrix)
+            Ru: Control magnitude weight
+            R_deltau: Control rate-of-change weight
             u_min: Minimum control input
             u_max: Maximum control input
             state_min: Minimum state values (optional)
             state_max: Maximum state values (optional)
-            max_iter: Maximum optimization iterations
-            tol: Optimization tolerance
+            ftol: Optimization tolerance
+            disp: Display optimization progress
         """
         self.prediction_horizon = prediction_horizon
         self.dt = dt
-        self.Q = Q
-        self.R = R
-        self.Ru = Ru
+        self.Q = Q if Q is not None else torch.tensor([1.0, 1.0])
+        self.Ru = Ru if Ru is not None else 0.5
+        self.R_deltau = R_deltau if R_deltau is not None else 0.5
         self.u_min = u_min
         self.u_max = u_max
         self.state_min = state_min
         self.state_max = state_max
-        self.max_iter = max_iter
-        self.tol = tol
+        self.ftol = ftol
+        self.disp = disp
 
 
 class MPCController:
-    """Nonlinear Model Predictive Control using CasADi."""
+    """Nonlinear Model Predictive Control using scipy.optimize."""
 
     def __init__(
         self,
@@ -72,244 +66,162 @@ class MPCController:
         """Initialize MPC controller.
 
         Args:
-            ode: ODE system (must be a torch.nn.Module with forward(t, x) method)
+            ode: ODE system
             config: MPC configuration
-            reference_state: Target/reference state to track
+            reference_state: Target state to track
             control_indices: Indices of state variables affected by control
         """
         self.ode = ode
         self.config = config
-        self.reference_state = reference_state.clone().detach()
+        self.reference_state = reference_state.detach().numpy()
         self.control_indices = control_indices
-
-        # Infer dimensions
         self.n_states = len(reference_state)
         self.n_controls = len(control_indices)
 
-        # Initialize default weight matrices if not provided
-        if config.Q is None:
-            self.Q = torch.ones(self.n_states)
-        elif config.Q.numel() == 1:
-            self.Q = config.Q * torch.ones(self.n_states)
-        else:
-            self.Q = config.Q
+        # Convert Q to diagonal matrix
+        Q_diag = config.Q.numpy() if isinstance(config.Q, torch.Tensor) else np.array(config.Q)
+        self.Q = np.diag(Q_diag)
+        self.Ru = config.Ru
+        self.R_deltau = config.R_deltau
 
-        if config.R is None:
-            self.R = 0.5 * torch.ones(self.n_controls)
-        elif config.R.numel() == 1:
-            self.R = config.R * torch.ones(self.n_controls)
-        else:
-            self.R = config.R
+        # Previous control for warm-starting
+        self.u_prev = 0.0
+        self.u_guess = None
 
-        if config.Ru is None:
-            self.Ru = 0.5 * torch.ones(self.n_controls)
-        elif config.Ru.numel() == 1:
-            self.Ru = config.Ru * torch.ones(self.n_controls)
-        else:
-            self.Ru = config.Ru
-
-        # Previous control for rate-of-change penalty
-        self.u_prev = torch.zeros(self.n_controls)
-
-    def _ode_numpy(self, x_np: np.ndarray) -> np.ndarray:
-        """Evaluate ODE in numpy (for CasADi).
+    def _ode_dynamics(self, x: np.ndarray, u: float) -> np.ndarray:
+        """Evaluate ODE dynamics: dx/dt = f(x) + control
 
         Args:
-            x_np: State vector (numpy)
+            x: State vector
+            u: Control input (scalar)
 
         Returns:
-            State derivative dx/dt (numpy)
+            State derivative
         """
-        x_torch = torch.tensor(x_np, dtype=torch.float32)
-        with torch.no_grad():
-            dx_torch = self.ode(torch.tensor(0.0), x_torch)
-        return dx_torch.numpy()
+        x_torch = torch.tensor(x, dtype=torch.float32)
 
-    def optimize_control(
-        self,
-        x0: torch.Tensor,
-        u_init: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, dict]:
-        """Solve MPC optimization problem using CasADi.
+        with torch.no_grad():
+            # Get base dynamics
+            dx = self.ode(torch.tensor(0.0), x_torch).numpy()
+
+            # Add control to appropriate state(s)
+            for idx in self.control_indices:
+                dx[idx] += u
+
+        return dx
+
+    def _rk4_step(self, x: np.ndarray, u: float, dt: float) -> np.ndarray:
+        """RK4 integration step.
 
         Args:
-            x0: Current state
-            u_init: Initial guess for control sequence (if None, use zero)
+            x: Current state
+            u: Control input
+            dt: Time step
 
         Returns:
-            Optimal control sequence (prediction_horizon, n_controls)
-            Optimization info dictionary
+            Next state
+        """
+        k1 = self._ode_dynamics(x, u)
+        k2 = self._ode_dynamics(x + 0.5 * dt * k1, u)
+        k3 = self._ode_dynamics(x + 0.5 * dt * k2, u)
+        k4 = self._ode_dynamics(x + dt * k3, u)
+        return x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+    def _mpc_objective(self, u_seq: np.ndarray, x0: np.ndarray) -> float:
+        """MPC cost function.
+
+        Args:
+            u_seq: Control sequence (flattened)
+            x0: Initial state
+
+        Returns:
+            Total cost
         """
         N = self.config.prediction_horizon
         dt = self.config.dt
 
-        # Create CasADi optimization problem
-        opti = ca.Opti()
+        u_seq = u_seq.reshape(N)
 
-        # Decision variables
-        X = opti.variable(self.n_states, N + 1)  # States
-        U = opti.variable(self.n_controls, N)     # Controls
-
-        # Convert torch tensors to numpy for CasADi
-        x0_np = x0.numpy()
-        ref_np = self.reference_state.numpy()
-        Q_np = self.Q.numpy()
-        R_np = self.R.numpy()
-        Ru_np = self.Ru.numpy()
-        u_prev_np = self.u_prev.numpy()
-
-        # Objective function
-        cost = 0
+        cost = 0.0
+        x_curr = x0.copy()
 
         for k in range(N):
+            u_k = u_seq[k]
+
+            # Predict next state
+            x_next = self._rk4_step(x_curr, u_k, dt)
+
             # State tracking cost
-            state_error = X[:, k+1] - ref_np
-            for i in range(self.n_states):
-                cost += Q_np[i] * state_error[i]**2
+            error = x_next - self.reference_state
+            state_cost = error.T @ self.Q @ error
+
+            # Control magnitude cost
+            control_magnitude_cost = self.Ru * (u_k**2)
 
             # Control rate-of-change cost
             if k == 0:
-                du = U[:, k] - u_prev_np
+                du = u_k - self.u_prev
             else:
-                du = U[:, k] - U[:, k-1]
-            for i in range(self.n_controls):
-                cost += R_np[i] * du[i]**2
+                du = u_k - u_seq[k-1]
+            control_change_cost = self.R_deltau * (du**2)
 
-            # Control magnitude cost
-            for i in range(self.n_controls):
-                cost += Ru_np[i] * U[i, k]**2
+            cost += state_cost + control_magnitude_cost + control_change_cost
 
-        opti.minimize(cost)
+            x_curr = x_next
 
-        # Initial condition constraint
-        opti.subject_to(X[:, 0] == x0_np)
+        return cost
 
-        # Dynamics constraints (Euler integration with linearized dynamics)
-        # Evaluate dynamics at initial state for linearization
-        dx0 = self._ode_numpy(x0_np)
-
-        for k in range(N):
-            x_k = X[:, k]
-
-            # Linearized dynamics: dx = dx0 (constant) + control
-            # Build dx as list, then convert to vertcat
-            dx_list = []
-            for i in range(self.n_states):
-                if i in self.control_indices:
-                    # Find which control index this is
-                    ctrl_idx = self.control_indices.index(i)
-                    dx_list.append(dx0[i] + U[ctrl_idx, k])
-                else:
-                    dx_list.append(dx0[i])
-
-            dx = ca.vertcat(*dx_list)
-            x_next = x_k + dt * dx
-            opti.subject_to(X[:, k+1] == x_next)
-
-        # Control bounds
-        for k in range(N):
-            for i in range(self.n_controls):
-                opti.subject_to(U[i, k] >= self.config.u_min)
-                opti.subject_to(U[i, k] <= self.config.u_max)
-
-        # State constraints (if provided)
-        if self.config.state_min is not None:
-            state_min_np = self.config.state_min.numpy()
-            for k in range(1, N+1):
-                for i in range(self.n_states):
-                    opti.subject_to(X[i, k] >= state_min_np[i])
-
-        if self.config.state_max is not None:
-            state_max_np = self.config.state_max.numpy()
-            for k in range(1, N+1):
-                for i in range(self.n_states):
-                    opti.subject_to(X[i, k] <= state_max_np[i])
-
-        # Set initial guess
-        if u_init is None:
-            u_init = torch.zeros(N, self.n_controls)
-        opti.set_initial(U, u_init.numpy().T)
-
-        # Warm-start states with forward simulation
-        x_guess = x0.clone()
-        x_traj_guess = [x_guess.numpy()]
-        for k in range(N):
-            u_k = u_init[k]
-            u_full = torch.zeros(self.n_states)
-            for i, idx in enumerate(self.control_indices):
-                u_full[idx] = u_k[i]
-            with torch.no_grad():
-                dx = self.ode(torch.tensor(0.0), x_guess) + u_full
-                x_guess = x_guess + dt * dx
-            x_traj_guess.append(x_guess.numpy())
-        opti.set_initial(X, np.array(x_traj_guess).T)
-
-        # Solver options
-        opts = {
-            'ipopt.print_level': 0,
-            'print_time': 0,
-            'ipopt.max_iter': self.config.max_iter,
-            'ipopt.tol': self.config.tol,
-            'ipopt.acceptable_tol': self.config.tol * 10,
-        }
-        opti.solver('ipopt', opts)
-
-        # Solve
-        try:
-            sol = opti.solve()
-            success = True
-            U_opt = sol.value(U)
-            cost_val = float(sol.value(cost))
-            message = "Optimization succeeded"
-        except RuntimeError as e:
-            # If solver fails, try to get the best solution so far
-            success = False
-            try:
-                U_opt = opti.debug.value(U)
-                cost_val = float(opti.debug.value(cost))
-            except:
-                U_opt = u_init.numpy().T
-                cost_val = float('inf')
-            message = f"Optimization failed: {str(e)}"
-
-        # Convert back to torch
-        u_opt = torch.tensor(U_opt.T, dtype=torch.float32)
-
-        info = {
-            'success': success,
-            'cost': cost_val,
-            'message': message
-        }
-
-        return u_opt, info
-
-    def step(
-        self,
-        x_current: torch.Tensor
-    ) -> Tuple[torch.Tensor, dict]:
-        """Compute MPC control action for current state (receding horizon).
+    def step(self, x_current: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+        """Compute MPC control action (receding horizon).
 
         Args:
             x_current: Current state
 
         Returns:
-            Control input to apply (n_controls,)
-            Info dictionary with optimization details
+            Control input to apply
+            Info dictionary
         """
-        # Solve optimization problem
-        u_opt_sequence, info = self.optimize_control(x_current)
+        N = self.config.prediction_horizon
+        x0_np = x_current.detach().numpy()
 
-        # Extract first control action (receding horizon principle)
-        u_mpc = u_opt_sequence[0]
+        # Initial guess (warm-start from previous solution)
+        if self.u_guess is None:
+            self.u_guess = np.zeros(N)
 
-        # Update previous control for next iteration
-        self.u_prev = u_mpc.clone()
+        # Bounds
+        bounds = [(self.config.u_min, self.config.u_max) for _ in range(N)]
 
-        # Store optimal sequence for warm-starting next iteration
-        # Shift sequence by one and pad with last value
-        self._u_opt_sequence = torch.cat([u_opt_sequence[1:], u_opt_sequence[-1:]])
+        # Optimize
+        res = minimize(
+            self._mpc_objective,
+            self.u_guess,
+            args=(x0_np,),
+            method='SLSQP',
+            bounds=bounds,
+            options={
+                'ftol': self.config.ftol,
+                'disp': self.config.disp,
+                'maxiter': 100,
+                'eps': 1e-4,  # Larger step for gradient estimation to survive float32 conversion
+            }
+        )
 
-        return u_mpc, info
+        u_optimal = res.x
+        u_control = u_optimal[0]
+
+        # Update for next iteration
+        self.u_prev = u_control
+        self.u_guess = np.roll(u_optimal, -1)
+        self.u_guess[-1] = u_optimal[-1]
+
+        info = {
+            'success': res.success,
+            'cost': float(res.fun),
+            'message': res.message,
+            'nit': res.nit,
+        }
+
+        return torch.tensor([u_control], dtype=torch.float32), info
 
 
 def simulate_mpc(
@@ -326,42 +238,36 @@ def simulate_mpc(
         mpc_controller: MPC controller
         x0: Initial state
         time_horizon: Total simulation time
-        dt: Time step for simulation (can differ from MPC dt)
+        dt: Time step
 
     Returns:
-        times: Time points (n_steps+1,)
-        states: State trajectory (n_steps+1, n_states)
-        controls: Control inputs (n_steps, n_controls)
+        times: Time points
+        states: State trajectory
+        controls: Control inputs
     """
     n_steps = int(time_horizon / dt)
     times = [0.0]
-    states = [x0]
+    states = [x0.detach().numpy()]
     controls = []
 
     x_current = x0.clone()
 
     for step in range(n_steps):
-        # Compute MPC control action
+        # Compute MPC control
         u_mpc, info = mpc_controller.step(x_current)
-        controls.append(u_mpc)
+        controls.append(u_mpc.numpy())
 
-        # Apply control and simulate one step (Euler integration)
-        u_full = torch.zeros_like(x_current)
-        # Handle both single and multiple controls
-        u_mpc_flat = u_mpc.flatten()
-        for i, idx in enumerate(mpc_controller.control_indices):
-            u_full[idx] = u_mpc_flat[i]
-
-        with torch.no_grad():
-            dx = ode(torch.tensor(0.0), x_current) + u_full
-            x_next = x_current + dt * dx
+        # Apply control and simulate one step
+        x_current_np = x_current.detach().numpy()
+        u_scalar = float(u_mpc[0])
+        x_next_np = mpc_controller._rk4_step(x_current_np, u_scalar, dt)
+        x_current = torch.tensor(x_next_np, dtype=torch.float32)
 
         times.append(times[-1] + dt)
-        states.append(x_next)
-        x_current = x_next
+        states.append(x_next_np)
 
     return (
-        torch.tensor(times),
-        torch.stack(states),
-        torch.stack(controls)
+        torch.tensor(times, dtype=torch.float32),
+        torch.tensor(np.array(states), dtype=torch.float32),
+        torch.tensor(np.array(controls), dtype=torch.float32)
     )

@@ -5,7 +5,7 @@ from rpasim.ode.classic_control.population import PopulationDynamics
 from rpasim.env.base import DifferentiableEnv
 from rpa_control.controllers import StaticController, ControlledODE
 from rpa_control.optimization.gradient import train_ode_parameters, TrainingConfig
-from rpa_control.utils.plotting import plot_training_comparison, plot_training_curves
+from rpa_control.utils.plotting import plot_training_comparison, plot_training_curves, plot_controller_heatmap
 from rpa_control.utils import ExperimentLogger
 from rpa_control.style import set_style
 
@@ -250,12 +250,16 @@ def train_population_controller(
     # Log results
     logger.log_history(history)
 
+    # Get physical parameters (rescaled from normalized basis)
+    physical_params = controlled_ode.controller.get_physical_params()
+
     summary = {
         'final_loss': history['loss'][-1],
         'final_reward': history['reward'][-1],
         'best_reward': history['best_reward'],
         'num_nonzero_params': history['num_nonzero_params'][-1],
         'best_params': history['best_params'].tolist(),
+        'best_params_physical': physical_params.detach().flatten().tolist(),
         'total_iterations': len(history['loss']),
     }
     logger.log_results(summary, controller_summary)
@@ -284,6 +288,16 @@ def train_population_controller(
         plot_training_curves(
             history=history,
             filename=str(plot_dir / 'training')
+        )
+
+        # Plot controller heatmap for explainability
+        plot_controller_heatmap(
+            controller=controlled_ode.controller,
+            state_ranges=[(60.0, 140.0), (10.0, 30.0)],
+            state_names=['Prey Population', 'Predator Population'],
+            critical_point=[100.0, 20.0],
+            resolution=100,
+            filename=str(plot_dir / 'controller_heatmap')
         )
 
     print("Note: Controller parameters have been restored to best (not final iteration)")

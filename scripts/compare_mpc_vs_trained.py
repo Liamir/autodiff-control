@@ -64,13 +64,13 @@ def compare_controllers(
     # Simulation settings
     time_horizon: float = 20.0,
     dt: float = 0.1,
-    # MPC settings
-    mpc_horizon: int = 10,
+    # MPC settings (paper parameters)
+    mpc_horizon: int = 10,  # m_p = m_c = 10
     mpc_dt: float = 0.1,
-    mpc_Q: float = 1.0,
-    mpc_R: float = 0.5,
-    mpc_Ru: float = 0.5,
-    mpc_u_min: float = -20.0,
+    mpc_Q: float = 1.0,  # Q = I_2x2
+    mpc_Ru: float = 0.5,  # Control magnitude penalty
+    mpc_R: float = 0.5,  # Rate-of-change penalty (R_deltau)
+    mpc_u_min: float = -20.0,  # u \in [-20, 20]
     mpc_u_max: float = 20.0,
     mpc_state_min: float = 0.0,  # Minimum population size
     # Trained controller settings
@@ -87,11 +87,11 @@ def compare_controllers(
         initial_state: Initial state [prey, predator]
         time_horizon: Simulation time horizon
         dt: Time step for simulation
-        mpc_horizon: MPC prediction horizon
+        mpc_horizon: MPC prediction horizon (m_p = m_c from paper)
         mpc_dt: MPC time step
-        mpc_Q: State tracking weight
-        mpc_R: Control rate-of-change weight
-        mpc_Ru: Control magnitude weight
+        mpc_Q: State tracking weight (Q = I_2x2 from paper)
+        mpc_Ru: Control magnitude penalty
+        mpc_R: Control rate-of-change penalty (R_deltau from paper)
         mpc_u_min: Minimum control input
         mpc_u_max: Maximum control input
         mpc_state_min: Minimum state value (population constraint)
@@ -123,16 +123,17 @@ def compare_controllers(
 
     # ========== MPC Controller ==========
     print("Setting up MPC controller...")
+    # Paper parameters: Q = I_2x2, Ru = R_deltau = 0.5, horizon = 10
     mpc_config = MPCConfig(
         prediction_horizon=mpc_horizon,
         dt=mpc_dt,
         Q=torch.tensor([mpc_Q, mpc_Q]),
-        R=torch.tensor([mpc_R]),
-        Ru=torch.tensor([mpc_Ru]),
+        Ru=mpc_Ru,
+        R_deltau=mpc_R,
         u_min=mpc_u_min,
         u_max=mpc_u_max,
         state_min=torch.tensor([mpc_state_min, mpc_state_min]),
-        max_iter=100,
+        ftol=1e-3,
     )
 
     mpc = MPCController(
@@ -143,6 +144,9 @@ def compare_controllers(
     )
 
     print(f"  Prediction horizon: {mpc_horizon}")
+    print(f"  Q weights: [{mpc_Q}, {mpc_Q}]")
+    print(f"  Ru (control magnitude): {mpc_Ru}")
+    print(f"  R_deltau (rate-of-change): {mpc_R}")
     print(f"  Control bounds: [{mpc_u_min}, {mpc_u_max}]")
     print(f"  State constraints: >= {mpc_state_min}")
     print()
@@ -169,9 +173,32 @@ def compare_controllers(
     # Load or train controller
     if trained_controller_path is not None:
         print(f"  Loading from: {trained_controller_path}")
-        # TODO: Implement loading mechanism
-        # For now, use default initialization
-        print("  Warning: Loading not implemented, using default initialization")
+        import json
+        from pathlib import Path
+
+        # Try to load from results file
+        results_path = Path(trained_controller_path)
+        if results_path.is_dir():
+            results_file = results_path / "results.txt"
+        else:
+            results_file = results_path
+
+        if results_file.exists():
+            # Parse best_params_physical from results file (rescaled parameters that work without basis normalization)
+            with open(results_file, 'r') as f:
+                for line in f:
+                    if line.startswith('best_params_physical:'):
+                        params_str = line.split(':', 1)[1].strip()
+                        params_list = eval(params_str)  # Safe here since it's our own file
+                        # Flatten if nested
+                        if isinstance(params_list[0], list):
+                            params_list = params_list[0]
+                        # Reshape to (n_control_vars, n_basis) = (1, 6)
+                        controller.params.data = torch.tensor(params_list, dtype=torch.float32).reshape(1, -1)
+                        print(f"  Loaded physical parameters: {params_list}")
+                        break
+        else:
+            print(f"  Warning: File not found, using default initialization")
     else:
         print("  Using default initialization (untrained)")
 
@@ -221,7 +248,7 @@ def compare_controllers(
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig, axes = plt.subplots(3, 2, figsize=(12, 12))
 
         # State trajectories - Prey
         ax = axes[0, 0]
@@ -263,6 +290,39 @@ def compare_controllers(
         ax.set_ylabel('Tracking Error')
         ax.set_title('Distance to Target')
         ax.set_yscale('log')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Accumulated control effort
+        ax = axes[2, 0]
+        cumulative_effort_mpc = torch.cumsum(controls_mpc ** 2, dim=0) * dt
+        cumulative_effort_trained = torch.cumsum(controls_trained ** 2, dim=0) * dt
+        ax.plot(times_mpc[:-1].numpy(), cumulative_effort_mpc.numpy(), 'b-', label='MPC', linewidth=2)
+        ax.plot(times_trained[:-1].numpy(), cumulative_effort_trained.detach().numpy(), 'r--', label='Trained', linewidth=2)
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Accumulated Control Effort')
+        ax.set_title('Cumulative Control Cost')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Accumulated total cost (state error + control)
+        ax = axes[2, 1]
+        # MPC cost: Q*error^2 + Ru*u^2
+        state_cost_mpc = torch.sum((states_mpc - critical_point) ** 2 * torch.tensor([mpc_Q, mpc_Q]), dim=1)
+        control_cost_mpc = torch.cat([torch.zeros(1), mpc_Ru * (controls_mpc ** 2).squeeze()])
+        total_cost_mpc = state_cost_mpc + control_cost_mpc
+        cumulative_cost_mpc = torch.cumsum(total_cost_mpc, dim=0) * dt
+
+        state_cost_trained = torch.sum((states_trained - critical_point) ** 2 * torch.tensor([mpc_Q, mpc_Q]), dim=1)
+        control_cost_trained = torch.cat([torch.zeros(1), mpc_Ru * (controls_trained ** 2).squeeze()])
+        total_cost_trained = state_cost_trained + control_cost_trained
+        cumulative_cost_trained = torch.cumsum(total_cost_trained, dim=0) * dt
+
+        ax.plot(times_mpc.numpy(), cumulative_cost_mpc.numpy(), 'b-', label='MPC', linewidth=2)
+        ax.plot(times_trained.numpy(), cumulative_cost_trained.detach().numpy(), 'r--', label='Trained', linewidth=2)
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Accumulated Total Cost')
+        ax.set_title('Cumulative Objective (State + Control)')
         ax.legend()
         ax.grid(True, alpha=0.3)
 

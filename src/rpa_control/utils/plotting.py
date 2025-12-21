@@ -1,5 +1,6 @@
 """Plotting utilities for training visualization."""
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 from rpasim.plot.ode import plot_trajectory
 from rpa_control.paths import save_fig
@@ -279,3 +280,96 @@ def plot_training_curves(history, figsize=(12, 8), filename='training_curves'):
     print(f"saved training curves to plots/{filename}.pdf")
 
     return fig, axes
+
+
+def plot_controller_heatmap(
+    controller,
+    state_ranges,
+    state_names,
+    critical_point=None,
+    resolution=100,
+    figsize=(10, 8),
+    filename='controller_heatmap',
+):
+    """Plot controller behavior as a heatmap over 2D state space.
+
+    Args:
+        controller: Trained controller (StaticController or DynamicController)
+        state_ranges: List of (min, max) tuples for each state variable
+        state_names: List of state variable names
+        critical_point: Optional target equilibrium point [state1, state2]
+        resolution: Number of grid points in each direction
+        figsize: Figure size
+        filename: Filename for saving the plot
+
+    Returns:
+        fig, ax: Matplotlib figure and axes
+    """
+    if len(state_ranges) != 2 or len(state_names) != 2:
+        raise ValueError("Controller heatmap only supports 2D state spaces")
+
+    # Create state space grid
+    state1_vals = np.linspace(state_ranges[0][0], state_ranges[0][1], resolution)
+    state2_vals = np.linspace(state_ranges[1][0], state_ranges[1][1], resolution)
+    state1_grid, state2_grid = np.meshgrid(state1_vals, state2_vals)
+
+    # Compute control signal at each point
+    control_grid = np.zeros_like(state1_grid)
+
+    for i in range(resolution):
+        for j in range(resolution):
+            state = torch.tensor([state1_grid[i, j], state2_grid[i, j]], dtype=torch.float32)
+
+            with torch.no_grad():
+                # For static controller
+                if hasattr(controller, 'params'):
+                    control = controller(state)
+                    control_grid[i, j] = control.item()
+                # For dynamic controller (use zero controller state)
+                elif hasattr(controller, 'output'):
+                    control = controller.output(torch.zeros(controller.n_controller_states))
+                    control_grid[i, j] = control.item()
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot heatmap
+    im = ax.contourf(state1_grid, state2_grid, control_grid, levels=50, cmap='RdBu_r')
+
+    # Add contour lines
+    contours = ax.contour(state1_grid, state2_grid, control_grid, levels=10,
+                          colors='black', alpha=0.3, linewidths=0.5)
+    ax.clabel(contours, inline=True, fontsize=8, fmt='%.1f')
+
+    # Mark critical point if provided
+    if critical_point is not None:
+        ax.plot(critical_point[0], critical_point[1], 'k*', markersize=20,
+                label=f'Critical Point ({critical_point[0]:.0f}, {critical_point[1]:.0f})',
+                markeredgewidth=1.5, markeredgecolor='white')
+
+    # Add zero control contour (dashed line)
+    zero_contour = ax.contour(state1_grid, state2_grid, control_grid, levels=[0],
+                               colors='green', linewidths=2, linestyles='--')
+    ax.clabel(zero_contour, inline=True, fontsize=10, fmt='u=%.1f')
+
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Control Signal u', rotation=270, labelpad=20)
+
+    # Labels and title
+    ax.set_xlabel(state_names[0])
+    ax.set_ylabel(state_names[1])
+    ax.set_title('Controller Behavior: Control Signal Heatmap')
+    if critical_point is not None:
+        ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    save_fig(fig, filename)
+    print(f"saved controller heatmap to plots/{filename}.pdf")
+
+    return fig, ax

@@ -152,3 +152,17 @@ class StaticController:
                 lines.append(f"  {control_name} = 0")
 
         return '\n'.join(lines)
+
+    def get_physical_params(self):
+        """Get physical parameters (rescaled from normalized basis).
+
+        Returns physical parameters that work with unnormalized basis functions.
+        If basis normalization was used, this converts back: β_physical = β_scaled / scale
+
+        Returns:
+            Tensor of shape (n_control_vars, n_basis) with physical parameters
+        """
+        if self.basis_scales_per_basis is not None:
+            return self.params / self.basis_scales_per_basis
+        else:
+            return self.params
