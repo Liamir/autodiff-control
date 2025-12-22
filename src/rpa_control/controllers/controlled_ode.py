@@ -11,16 +11,17 @@ class ControlledODE(ODE):
     """ODE augmented with a controller.
 
     For static controller:
-        Original ODE: dX/dt = f(X, θ, β)
-        With control: dX_i/dt = f_i(X, θ, β) + u_i
+        Original ODE: dX/dt = f(X, θ, β, u)
+        Control: u = controller(X)
 
     For dynamic controller:
         Augmented state: [X, C]
-        dX_i/dt = f_i(X, θ, β) + u_i
+        dX/dt = f(X, θ, β, u)
         dC/dt = g(X, C)
         u = h(C)
 
     The controller parameters become the differentiable parameters.
+    The base ODE receives control via the `control` parameter in its forward method.
     """
 
     def __init__(
@@ -112,9 +113,6 @@ class ControlledODE(ODE):
             observing_params = differentiable_params[:dynamics_size].reshape(self.controller.observing_params.shape)
             actuating_params = differentiable_params[dynamics_size:].reshape(self.controller.actuating_params.shape)
 
-            # Compute base ODE dynamics
-            base_derivative = self.base_ode(t, base_state, None, fixed_params)
-
             # Compute controller output (actuating): u = θ_act · Ψ(C)
             output_basis = polynomial_basis(controller_state, self.controller.actuating_order, self.controller.include_constant)
 
@@ -123,6 +121,9 @@ class ControlledODE(ODE):
                 output_basis = output_basis / self.controller.actuating_basis_scales_per_basis
 
             control = torch.matmul(actuating_params, output_basis)
+
+            # Compute base ODE dynamics with control
+            base_derivative = self.base_ode(t, base_state, None, fixed_params, control=control)
 
             # Compute controller dynamics (observing): dC/dt = θ_obs · Φ(X, C)
             augmented_state = torch.cat([base_state, controller_state])
@@ -134,10 +135,6 @@ class ControlledODE(ODE):
 
             controller_derivative = torch.matmul(observing_params, dynamics_basis)
 
-            # Add control to specified state variables
-            for i, control_idx in enumerate(self.control_indices):
-                base_derivative[control_idx] = base_derivative[control_idx] + control[i]
-
             # Concatenate derivatives
             derivative = torch.cat([base_derivative, controller_derivative])
 
@@ -146,9 +143,6 @@ class ControlledODE(ODE):
             base_state = state
 
             # differentiable_params is already (n_control_vars, n_basis) shape - no reshape needed
-
-            # Compute base ODE dynamics
-            base_derivative = self.base_ode(t, base_state, None, fixed_params)
 
             # Compute control (observed): u = θ_obs · Φ(X)
             basis = polynomial_basis(base_state, self.controller.order, self.controller.include_constant)
@@ -159,9 +153,8 @@ class ControlledODE(ODE):
 
             control = torch.matmul(differentiable_params, basis)
 
-            # Add control to specified state variables
-            for i, control_idx in enumerate(self.control_indices):
-                base_derivative[control_idx] = base_derivative[control_idx] + control[i]
+            # Compute base ODE dynamics with control
+            base_derivative = self.base_ode(t, base_state, None, fixed_params, control=control)
 
             derivative = base_derivative
 
