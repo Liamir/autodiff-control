@@ -1,9 +1,15 @@
 """Nonlinear Model Predictive Control (NMPC) for ODE systems.
 
 Uses scipy.optimize with RK4 integration based on the SINDY-MPC paper approach.
+
+Supports generic control interface: ODEs that accept control via the `control` parameter
+in their forward() method. This works with both additive and nonlinear control coupling.
+
+For legacy additive control (PopulationDynamics), see mpc_additive.py.
 """
 import torch
 import numpy as np
+import inspect
 from typing import Optional, Tuple
 from scipy.optimize import minimize
 
@@ -24,13 +30,15 @@ class MPCConfig:
         state_max: Optional[torch.Tensor] = None,
         ftol: float = 1e-3,
         disp: bool = False,
+        cost_type: str = 'quadratic',
+        tracked_state_indices: Optional[list[int]] = None,
     ):
         """Initialize MPC configuration.
 
         Args:
             prediction_horizon: Number of steps to predict ahead
             dt: Time step
-            Q: State tracking weight (diagonal of Q matrix)
+            Q: State tracking weight (diagonal of Q matrix for quadratic, or vector for L1)
             Ru: Control magnitude weight
             R_deltau: Control rate-of-change weight
             u_min: Minimum control input
@@ -39,6 +47,8 @@ class MPCConfig:
             state_max: Maximum state values (optional)
             ftol: Optimization tolerance
             disp: Display optimization progress
+            cost_type: Type of cost function ('quadratic' or 'l1')
+            tracked_state_indices: Indices of states to track (None = track all states)
         """
         self.prediction_horizon = prediction_horizon
         self.dt = dt
@@ -51,62 +61,90 @@ class MPCConfig:
         self.state_max = state_max
         self.ftol = ftol
         self.disp = disp
+        self.cost_type = cost_type
+        self.tracked_state_indices = tracked_state_indices
 
 
 class MPCController:
-    """Nonlinear Model Predictive Control using scipy.optimize."""
+    """Nonlinear Model Predictive Control using scipy.optimize.
+
+    Uses generic control interface: passes control to ODE via `control` parameter.
+    Works with both additive and nonlinear control coupling.
+    """
 
     def __init__(
         self,
         ode: torch.nn.Module,
         config: MPCConfig,
         reference_state: torch.Tensor,
-        control_indices: list[int],
+        n_controls: int = 1,
     ):
         """Initialize MPC controller.
 
         Args:
-            ode: ODE system
+            ode: ODE system that accepts `control` parameter in forward()
             config: MPC configuration
             reference_state: Target state to track
-            control_indices: Indices of state variables affected by control
+            n_controls: Number of control inputs (default: 1)
         """
         self.ode = ode
         self.config = config
         self.reference_state = reference_state.detach().numpy()
-        self.control_indices = control_indices
         self.n_states = len(reference_state)
-        self.n_controls = len(control_indices)
+        self.n_controls = n_controls
 
-        # Convert Q to diagonal matrix
-        Q_diag = config.Q.numpy() if isinstance(config.Q, torch.Tensor) else np.array(config.Q)
-        self.Q = np.diag(Q_diag)
+        # Verify ODE supports control parameter
+        forward_sig = inspect.signature(ode.forward)
+        if 'control' not in forward_sig.parameters:
+            raise ValueError(
+                f"ODE {type(ode).__name__} does not accept 'control' parameter. "
+                "For additive control ODEs, use mpc_additive.py instead."
+            )
+
+        # Convert Q to weights
+        Q_weights = config.Q.numpy() if isinstance(config.Q, torch.Tensor) else np.array(config.Q)
+        if config.cost_type == 'quadratic':
+            self.Q = np.diag(Q_weights)  # Diagonal matrix for quadratic cost
+        else:  # L1 cost
+            self.Q = Q_weights  # Vector of weights for L1 cost
+
         self.Ru = config.Ru
         self.R_deltau = config.R_deltau
+        self.cost_type = config.cost_type
+        self.tracked_state_indices = config.tracked_state_indices
 
         # Previous control for warm-starting
         self.u_prev = 0.0
         self.u_guess = None
 
     def _ode_dynamics(self, x: np.ndarray, u: float) -> np.ndarray:
-        """Evaluate ODE dynamics: dx/dt = f(x) + control
+        """Evaluate ODE dynamics: dx/dt = f(x, u)
+
+        Uses generic control interface: passes control to ODE.forward().
 
         Args:
             x: State vector
-            u: Control input (scalar)
+            u: Control input (scalar or vector)
 
         Returns:
             State derivative
         """
         x_torch = torch.tensor(x, dtype=torch.float32)
 
-        with torch.no_grad():
-            # Get base dynamics
-            dx = self.ode(torch.tensor(0.0), x_torch).numpy()
+        # Convert control to tensor
+        # For single control, u is scalar; for multiple controls, u is array
+        if self.n_controls == 1:
+            u_torch = torch.tensor([u], dtype=torch.float32)
+        else:
+            u_torch = torch.tensor(u, dtype=torch.float32)
 
-            # Add control to appropriate state(s)
-            for idx in self.control_indices:
-                dx[idx] += u
+        with torch.no_grad():
+            # Get dynamics with control
+            dx = self.ode(
+                torch.tensor(0.0),
+                x_torch,
+                control=u_torch
+            ).numpy()
 
         return dx
 
@@ -153,10 +191,27 @@ class MPCController:
 
             # State tracking cost
             error = x_next - self.reference_state
-            state_cost = error.T @ self.Q @ error
+
+            if self.cost_type == 'l1':
+                # L1 cost: sum of absolute values
+                if self.tracked_state_indices is not None:
+                    # Only track specific states
+                    tracked_error = error[self.tracked_state_indices]
+                    weighted_error = self.Q * np.abs(tracked_error)
+                    state_cost = np.sum(weighted_error)
+                else:
+                    # Track all states
+                    weighted_error = self.Q * np.abs(error)
+                    state_cost = np.sum(weighted_error)
+            else:  # quadratic cost
+                # Quadratic cost: error^T @ Q @ error
+                state_cost = error.T @ self.Q @ error
 
             # Control magnitude cost
-            control_magnitude_cost = self.Ru * (u_k**2)
+            if self.cost_type == 'l1':
+                control_magnitude_cost = self.Ru * np.abs(u_k)  # |u|
+            else:
+                control_magnitude_cost = self.Ru * (u_k**2)  # u²
 
             # Control rate-of-change cost
             if k == 0:

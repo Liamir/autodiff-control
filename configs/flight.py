@@ -88,13 +88,9 @@ ENV_CONFIG = {
 
     # Initial conditions
     # NOTE: These initial states are uncertain - not specified in the paper.
-    # Chosen based on:
-    # - x1 constraint from paper: [-0.2, 0.4]
-    # - Staying near equilibrium [0, 0, 0]
-    # - Avoiding extreme values that might cause numerical issues
-    # May need adjustment based on training results or domain knowledge.
-    'initial_state': torch.tensor([0.1, 0.0, 0.0]),  # Slightly perturbed from zero
-    'initial_state_range': [(-0.1, 0.3), (-0.2, 0.2), (-0.5, 0.5)],  # x1, x2, x3
+    # Starting from equilibrium for simplicity.
+    'initial_state': torch.tensor([0.0, 0.0, 0.0]),  # Equilibrium
+    'initial_state_range': None,  # Train from single initial state for now
 
     # Fixed evaluation initial conditions
     'eval_initial_states': [
@@ -140,12 +136,13 @@ Parameters:
         'time_horizon': 13.0,  # From paper
         'n_reward_steps': 100,
         'steady_state_fraction': 0.3,  # Shorter settling time for tracking
-        'learning_rate': 0.05,
+        'learning_rate': 0.01,  # Lower LR for stability
         'n_iterations': 500,
         'log_interval': 50,
         'eval_interval': 50,
-        'controller_order': 2,
+        'controller_order': 1,  # First-order for simplicity
         'scale_aware_regularization': True,
         'state_limits': (-1.0, 1.0),  # Reasonable limits for normalized states
+        'gradient_clip_norm': 10.0,  # Clip gradients to prevent explosion
     }
 }

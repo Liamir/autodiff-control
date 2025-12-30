@@ -27,6 +27,9 @@ class TrainingConfig:
     eval_interval: int = 0  # Evaluate every N iterations on fixed ICs (0 = no evaluation)
     eval_initial_states: Optional[List[torch.Tensor]] = None  # Fixed ICs for evaluation (None = no evaluation)
     n_param_samples_eval: int = 10  # Number of parameter samples per IC during evaluation (only used if perturb_param_indices is set)
+    # Truncated Backpropagation Through Time (TBPTT)
+    use_tbptt: bool = True  # Enable truncated backprop (reduces gradient computation length)
+    tbptt_truncation_steps: int = 5  # Number of time steps to backprop through (0 = full BPTT)
     # Three-stage training pipeline (improved alternative to iterative LS)
     use_three_stage: bool = False  # Enable 3-stage: normal → L1 regularization → thresholding
     n_iterations_stage1: int = 1000  # Stage 1: normal training without regularization
@@ -334,18 +337,114 @@ def _train_single_round(
                 perturbed_factors.append(random_factor)
             current_ode.fixed_params = perturbed_fixed_params
 
-        # Run simulation
+        # Run simulation with optional TBPTT
         time_horizon = env.time_horizon if hasattr(env, 'time_horizon') else 10.0
-        obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
 
-        # Debug: check forward pass on first iteration
-        if iteration == 0 and config.verbose:
-            times, states, rewards = env.get_trajectory()
-            state_has_nan = any(torch.isnan(s).any().item() for s in states)
-            state_has_inf = any(torch.isinf(s).any().item() for s in states)
-            state_max = max(torch.abs(s).max().item() for s in states)
-            reward_has_nan = torch.isnan(reward).any().item() if torch.is_tensor(reward) else False
-            print(f"[DEBUG] Iteration 0 forward pass: state_has_nan={state_has_nan}, state_has_inf={state_has_inf}, state_max={state_max:.2e}, reward_has_nan={reward_has_nan}, reward={reward}")
+        if config.use_tbptt and config.tbptt_truncation_steps > 0:
+            # Truncated BPTT: simulate in chunks and detach between chunks
+            # This prevents gradients from flowing too far back in time
+
+            # Get dt from environment (assumes constant dt)
+            # We need to infer dt from n_reward_steps
+            n_reward_steps = env.n_reward_steps if hasattr(env, 'n_reward_steps') else 100
+            dt = time_horizon / n_reward_steps
+
+            # Calculate chunk size
+            chunk_duration = config.tbptt_truncation_steps * dt
+            num_chunks = int(time_horizon / chunk_duration)
+            if num_chunks == 0:
+                num_chunks = 1
+                chunk_duration = time_horizon
+
+            if iteration == 0 and config.verbose:
+                print(f"[DEBUG] TBPTT: time_horizon={time_horizon}, dt={dt:.4f}, chunk_duration={chunk_duration:.4f}, num_chunks={num_chunks}")
+
+            # Accumulate reward and trajectories across chunks
+            total_reward = torch.tensor(0.0, requires_grad=True)
+            all_times = []
+            all_states = []
+            all_rewards = []
+
+            # Initial state
+            current_state = state.clone()
+
+            for chunk_idx in range(num_chunks):
+                # Detach state to break gradient flow (except for first chunk)
+                if chunk_idx > 0:
+                    current_state = current_state.detach()
+
+                # Debug: check computational graph setup for first few chunks
+                if iteration == 0 and chunk_idx < 3 and config.verbose:
+                    print(f"[DEBUG] Chunk {chunk_idx}: START current_state={current_state.detach().numpy()}, requires_grad={current_state.requires_grad}")
+                    print(f"[DEBUG] Chunk {chunk_idx}: ODE controller params require_grad={current_ode.controller.params.requires_grad if hasattr(current_ode, 'controller') else 'N/A'}")
+
+                # Set environment state directly (don't call reset() which would go back to initial_state)
+                env.current_state = current_state
+                env.current_time = chunk_idx * chunk_duration
+                # Clear trajectory for this chunk
+                env.trajectory_segments = []
+                env.time_segments = []
+                env.reward_segments = []
+
+                # Restore perturbed params if applicable
+                if config.perturb_param_indices is not None and len(config.perturb_param_indices) > 0:
+                    current_ode.fixed_params = original_fixed_params.clone()
+                    perturbed_fixed_params = current_ode.fixed_params.clone()
+                    for idx in config.perturb_param_indices:
+                        fold = config.perturb_fold_change
+                        log_factor = torch.rand(1).item() * 2 * torch.log(torch.tensor(fold)).item() - torch.log(torch.tensor(fold)).item()
+                        random_factor = torch.exp(torch.tensor(log_factor)).item()
+                        perturbed_fixed_params[idx] = perturbed_fixed_params[idx] * random_factor
+                    current_ode.fixed_params = perturbed_fixed_params
+
+                # Simulate chunk
+                chunk_horizon = min(chunk_duration, time_horizon - chunk_idx * chunk_duration)
+                obs, chunk_reward, terminated, truncated, info = env.step((current_ode, chunk_horizon))
+
+                # Update current state for next chunk
+                current_state = obs[1]
+
+                # Debug: check chunk results
+                if iteration == 0 and chunk_idx < 3 and config.verbose:
+                    print(f"[DEBUG] Chunk {chunk_idx}: chunk_reward={chunk_reward.item() if torch.is_tensor(chunk_reward) else chunk_reward:.2e}, chunk_reward.requires_grad={chunk_reward.requires_grad if torch.is_tensor(chunk_reward) else 'N/A'}")
+                    print(f"[DEBUG] Chunk {chunk_idx}: final_state={current_state.detach().numpy()}, has_nan={torch.isnan(current_state).any().item()}")
+
+                # Accumulate reward
+                total_reward = total_reward + chunk_reward
+
+                # Collect trajectory for debugging/metrics
+                times, states, rewards = env.get_trajectory()
+                all_times.extend(times.tolist() if hasattr(times, 'tolist') else times)
+                all_states.extend(states)
+                all_rewards.extend(rewards)
+
+            reward = total_reward
+
+            # Debug: check forward pass on first iteration
+            if iteration == 0 and config.verbose:
+                state_has_nan = any(torch.isnan(s).any().item() for s in all_states)
+                state_has_inf = any(torch.isinf(s).any().item() for s in all_states)
+                state_max = max(torch.abs(s).max().item() for s in all_states)
+                reward_has_nan = torch.isnan(reward).any().item() if torch.is_tensor(reward) else False
+                print(f"[DEBUG] Iteration 0 forward pass (TBPTT): state_has_nan={state_has_nan}, state_has_inf={state_has_inf}, state_max={state_max:.2e}, reward_has_nan={reward_has_nan}, reward={reward}")
+                print(f"[DEBUG] total_reward.requires_grad={reward.requires_grad if torch.is_tensor(reward) else 'N/A'}")
+
+            # Store trajectory in environment for metrics computation
+            # (This is a bit hacky but needed for control statistics below)
+            env._trajectory = (all_times, all_states, all_rewards)
+
+        else:
+            # Standard full BPTT: single simulation through full time horizon
+            obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
+
+            # Debug: check forward pass on first iteration
+            if iteration == 0 and config.verbose:
+                times, states, rewards = env.get_trajectory()
+                state_has_nan = any(torch.isnan(s).any().item() for s in states)
+                state_has_inf = any(torch.isinf(s).any().item() for s in states)
+                state_max = max(torch.abs(s).max().item() for s in states)
+                reward_has_nan = torch.isnan(reward).any().item() if torch.is_tensor(reward) else False
+                print(f"[DEBUG] Iteration 0 forward pass: state_has_nan={state_has_nan}, state_has_inf={state_has_inf}, state_max={state_max:.2e}, reward_has_nan={reward_has_nan}, reward={reward}")
 
         # Restore original fixed params
         if original_fixed_params is not None:
