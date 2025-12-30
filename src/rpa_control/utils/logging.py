@@ -124,7 +124,7 @@ class ExperimentLogger:
             for key, value in summary_dict.items():
                 if torch.is_tensor(value):
                     if value.numel() == 1:
-                        f.write(f"{key}: {value.item():.6f}\n")
+                        f.write(f"{key}: {value.item()}\n")
                     else:
                         f.write(f"{key}: {value.tolist()}\n")
                 else:

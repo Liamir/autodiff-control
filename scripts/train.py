@@ -1,11 +1,12 @@
 """Generic training script that works with any environment configuration."""
 import fire
 import torch
+import numpy as np
+import random
 import importlib.util
 from pathlib import Path
 from rpasim.env.base import DifferentiableEnv
 from rpa_control.optimization.gradient import train_ode_parameters, TrainingConfig
-from rpa_control.utils.plotting import plot_training_comparison, plot_training_curves
 from rpa_control.utils import ExperimentLogger
 from rpa_control.style import set_style
 
@@ -46,8 +47,9 @@ def train(
     time_horizon: float = None,
     log_interval: int = None,
     eval_interval: int = None,
-    save_plot: bool = True,
     steady_state_fraction: float = None,
+    # Reproducibility
+    seed: int = None,
     # Scale-aware regularization
     scale_aware_regularization: bool = None,
     # Three-stage training
@@ -77,8 +79,8 @@ def train(
         time_horizon: Simulation time horizon (overrides default)
         log_interval: Print progress every N iterations (overrides default)
         eval_interval: Evaluate on fixed ICs every N iterations (overrides default)
-        save_plot: Whether to save training curves
         steady_state_fraction: Fraction of trajectory to skip before computing reward (overrides default)
+        seed: Random seed for reproducibility (overrides default)
         scale_aware_regularization: Use basis normalization (overrides default)
         use_three_stage: Use 3-stage training: normal → L1 reg → thresholding
         n_iterations_stage1: Iterations for stage 1
@@ -99,6 +101,22 @@ def train(
 
     # Get defaults from config
     defaults = env_config.get('defaults', {})
+
+    # Set random seed for reproducibility
+    # If seed is None, use config default
+    # If seed is -1, disable seeding (truly random)
+    if seed is None:
+        seed = defaults.get('seed', None)
+
+    if seed is not None and seed >= 0:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        print(f"Random seed set to: {seed}")
+        print()
+    elif seed == -1:
+        print("Random seeding disabled (using system randomness)")
+        print()
 
     # Apply defaults for parameters not specified
     if n_iterations is None:
@@ -222,6 +240,7 @@ def train(
         'l2_penalty': l2_penalty,
         'time_horizon': time_horizon,
         'steady_state_fraction': steady_state_fraction,
+        'seed': seed,
         'scale_aware_regularization': scale_aware_regularization,
         'use_three_stage': use_three_stage,
         'n_iterations_stage1': n_iterations_stage1,
@@ -243,6 +262,13 @@ def train(
     if 'controller_order' in sig.parameters:
         config_dict['controller_order'] = controller_order
         config_dict['include_constant'] = include_constant
+
+    # Add plotting and display parameters (for analysis script)
+    config_dict['target_var_idx'] = env_config.get('target_var_idx', None)
+    config_dict['target_value'] = env_config.get('target_value', None)
+    config_dict['state_var_names'] = env_config.get('state_var_names', None)
+    config_dict['control_names'] = env_config.get('control_names', None)
+    config_dict['param_names'] = env_config.get('param_names', None)
 
     logger.log_config(config_dict)
 
@@ -266,26 +292,12 @@ def train(
     )
 
     print()
+    print("="*60)
     print("Training complete!")
-    print(f"Final loss: {history['loss'][-1]:.6f}")
-    print(f"Final reward: {history['reward'][-1]:.6f}")
-    print(f"Best reward (single iter): {history['best_reward']:.6f}")
-
-    if eval_interval > 0 and 'eval_reward' in history:
-        eval_rewards = [r for r in history['eval_reward'] if r is not None]
-        if eval_rewards:
-            best_eval_reward = max(eval_rewards)
-            print(f"Best eval reward: {best_eval_reward:.6f}")
-
-    print(f"Non-zero params: {history['num_nonzero_params'][-1]}")
-
-    # Format best parameters
-    best_params_flat = history['best_params'].flatten()
-    best_params_str = "[" + ", ".join([f"{p.item():.6f}" for p in best_params_flat]) + "]"
-    print(f"Best params: {best_params_str}")
+    print("="*60)
     print()
 
-    # Print parameter summary (if param_names provided)
+    # Generate parameter summary for saving (but don't print it here)
     param_names = env_config.get('param_names', None)
     param_summary = ""
 
@@ -293,25 +305,15 @@ def train(
         # Controller-based ODE
         state_var_names = env_config.get('state_var_names', None)
         control_names = env_config.get('control_names', ['u'])
-        print("Trained Controller:")
-        print("-"*60)
         param_summary = ode.get_controller_summary(state_var_names, control_names)
-        print(param_summary)
     elif param_names is not None:
         # Direct parameter ODE (like AB circuit)
-        print("Trained Parameters:")
-        print("-"*60)
         if hasattr(ode, 'differentiable_params'):
             params = ode.differentiable_params.detach()
             for name, value in zip(param_names, params):
-                print(f"  {name} = {value.item():.6f}")
-                param_summary += f"  {name} = {value.item():.6f}\n"
-        else:
-            print("  (parameters stored in ODE)")
+                param_summary += f"  {name} = {value.item()}\n"
 
-    print()
-
-    # Log results
+    # Log results with full precision
     logger.log_history(history)
 
     summary = {
@@ -330,55 +332,7 @@ def train(
 
     logger.log_results(summary, param_summary)
 
-    # Plot trajectories and training curves
-    if save_plot:
-        plot_dir = logger.get_experiment_path()
-
-        # Determine what to plot
-        target_var_idx = env_config.get('target_var_idx', None)
-        target_value = env_config.get('target_value', None)
-
-        # For controller-based ODEs, create uncontrolled version for comparison
-        if hasattr(ode, 'base_ode'):
-            # Controlled ODE - compare with uncontrolled
-            uncontrolled_ode = type(ode.base_ode)()
-            plot_training_comparison(
-                ode_initial=uncontrolled_ode,
-                ode_final=ode,
-                initial_state=initial_state,
-                time_horizon=time_horizon,
-                target_var_idx=target_var_idx,
-                target_value=target_value,
-                initial_state_range=initial_state_range,
-                n_initial_states=5 if initial_state_range is not None else 1,
-                filename=str(plot_dir / 'trajectories')
-            )
-        else:
-            # Direct ODE - create initial version with default parameters for comparison
-            # Get the initial parameters from config (first call to create_ode)
-            if 'controller_order' in sig.parameters:
-                ode_initial = create_ode(controller_order=controller_order, include_constant=include_constant)
-            else:
-                ode_initial = create_ode()
-
-            plot_training_comparison(
-                ode_initial=ode_initial,
-                ode_final=ode,
-                initial_state=initial_state,
-                time_horizon=time_horizon,
-                target_var_idx=target_var_idx,
-                target_value=target_value,
-                initial_state_range=initial_state_range,
-                n_initial_states=5 if initial_state_range is not None else 1,
-                filename=str(plot_dir / 'trajectories')
-            )
-
-        plot_training_curves(
-            history=history,
-            filename=str(plot_dir / 'training')
-        )
-
-    print("Note: Parameters have been restored to best (not final iteration)")
+    print("Results saved. Use scripts/analyze.py to view detailed results and generate plots.")
     print()
 
     # Stop logging and print location

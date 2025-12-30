@@ -10,10 +10,15 @@ def reward_fn(state, time=None):
     return -((state - critical_point) ** 2).sum()
 
 
+def create_base_ode():
+    """Create base population ODE (for MPC or uncontrolled simulation)."""
+    return PopulationDynamics()
+
+
 def create_ode(controller_order=2, include_constant=True):
     """Create controlled population ODE instance."""
     # Create population ODE
-    pop_ode = PopulationDynamics()
+    pop_ode = create_base_ode()
 
     # Create static controller
     # 2 state vars (prey, predator), 1 control output (affects predator only)
@@ -40,8 +45,10 @@ ENV_CONFIG = {
     'experiment_name': 'population_static',
 
     # ODE setup
+    'create_base_ode': create_base_ode,
     'create_ode': create_ode,
     'reward_fn': reward_fn,
+    'reference_state': torch.tensor([100.0, 20.0]),  # Target critical point
 
     # Initial conditions
     'initial_state': torch.tensor([80.0, 25.0]),
@@ -95,5 +102,20 @@ Parameters:
         'controller_order': 2,
         'scale_aware_regularization': True,
         'state_limits': (0.0, 200.0),  # Tighter limits for more reasonable penalties
+        'seed': 42,  # Random seed for reproducibility
+    },
+
+    # MPC settings
+    'mpc_defaults': {
+        'prediction_horizon': 10,     # Number of steps to predict ahead
+        'dt': 0.1,                     # MPC time step
+        'Q': [1.0, 1.0],               # State tracking weights [prey, predator]
+        'Ru': 0.5,                     # Control magnitude weight
+        'R_deltau': 0.5,               # Control rate-of-change weight
+        'u_min': -20.0,                # Minimum control input
+        'u_max': 20.0,                 # Maximum control input
+        'cost_type': 'quadratic',      # 'quadratic' or 'l1'
+        'ftol': 1e-3,                  # Optimization tolerance
+        'n_controls': 1,               # Number of control inputs
     }
 }
