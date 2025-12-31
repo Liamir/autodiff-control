@@ -35,6 +35,29 @@ def load_config(config_name: str):
     return config_module.ENV_CONFIG
 
 
+def extract_model_params(ode):
+    """Extract model parameters from an ODE for logging.
+
+    Args:
+        ode: ODE instance
+
+    Returns:
+        dict: Dictionary with parameter names and values
+    """
+    params_dict = {}
+
+    if hasattr(ode, 'fixed_params') and ode.fixed_params is not None:
+        param_values = ode.fixed_params.detach().tolist()
+        # Try to get parameter names from class attribute
+        if hasattr(ode.__class__, 'fixed_param_names'):
+            param_names = ode.__class__.fixed_param_names
+            params_dict['model_params'] = dict(zip(param_names, param_values))
+        else:
+            params_dict['model_params'] = param_values
+
+    return params_dict
+
+
 def run_mpc(
     config: str,
     # Simulation settings
@@ -50,6 +73,8 @@ def run_mpc(
     u_max: float = None,
     cost_type: str = None,
     ftol: float = None,
+    # Test model parameters (for model mismatch: plan with nominal, simulate with true)
+    test_model_params: str = None,
 ):
     """
     Run MPC on any environment configuration and save results to logs.
@@ -67,6 +92,9 @@ def run_mpc(
         u_max: Maximum control input (default: from config)
         cost_type: Cost function type ('quadratic' or 'l1', default: from config)
         ftol: Optimization tolerance (default: from config)
+        test_model_params: JSON string of model parameters for simulation (e.g., '{"a": 0.6, "b": 0.03}')
+                          If provided, MPC uses nominal model for planning but true model for simulation.
+                          This simulates model mismatch between estimated and true systems.
     """
     set_style()
 
@@ -101,10 +129,15 @@ def run_mpc(
         import json
         initial_state = torch.tensor(json.loads(initial_state), dtype=torch.float32)
 
-    # Get reference state
-    reference_state = env_config.get('reference_state')
-    if reference_state is None:
-        raise ValueError("Config must specify 'reference_state' for MPC")
+    # Construct reference_state from target_vars
+    # Only variables in target_vars contribute to tracking error; others are zero
+    target_vars = env_config.get('target_vars', {})
+    if not target_vars:
+        raise ValueError("Config must specify 'target_vars' for MPC")
+
+    reference_state = torch.zeros_like(initial_state)
+    for idx, value in target_vars.items():
+        reference_state[idx] = value
 
     # Get time horizon
     if time_horizon is None:
@@ -140,14 +173,61 @@ def run_mpc(
         print(env_config['description'])
         print()
 
-    # Create base ODE
+    # Create true ODE for simulation (always uses default parameters from config)
     create_base_ode = env_config.get('create_base_ode')
     if create_base_ode is None:
         raise ValueError("Config must provide 'create_base_ode' function for MPC")
 
-    ode = create_base_ode()
-    print(f"ODE created: {type(ode).__name__}")
+    true_ode = create_base_ode()
+    print(f"Simulation ODE created: {type(true_ode).__name__}")
+
+    # Extract and log simulation model parameters (the true system)
+    simulation_model_params = extract_model_params(true_ode)
+    if 'model_params' in simulation_model_params:
+        print(f"Simulation model parameters (true system): {simulation_model_params['model_params']}")
     print()
+
+    # Create planning ODE for MPC predictions (might have wrong parameters)
+    import json as json_module
+    planning_ode = true_ode  # Default: assume perfect model knowledge
+    planning_model_params = simulation_model_params  # Default: same as true system
+
+    if test_model_params is not None:
+        print("Creating planning ODE with different model parameters (imperfect knowledge)...")
+        # Parse test model params (fire may pass it as dict or string)
+        if isinstance(test_model_params, str):
+            test_params_dict = json_module.loads(test_model_params)
+        else:
+            test_params_dict = test_model_params
+        print(f"Planning model parameters (what MPC thinks): {test_params_dict}")
+
+        # Get param names and create new tensor
+        if hasattr(true_ode.__class__, 'fixed_param_names'):
+            param_names_list = true_ode.__class__.fixed_param_names
+            # Build new param tensor from test_params_dict
+            new_params = []
+            for pname in param_names_list:
+                if pname in test_params_dict:
+                    new_params.append(test_params_dict[pname])
+                else:
+                    # Use true value if not specified
+                    idx = param_names_list.index(pname)
+                    new_params.append(true_ode.fixed_params[idx].item())
+            new_fixed_params = torch.tensor(new_params)
+
+            # Create new ODE with planning parameters (MPC's internal model)
+            planning_ode = create_base_ode()
+            planning_ode.fixed_params = new_fixed_params
+
+            # Extract and log planning model parameters
+            planning_model_params = extract_model_params(planning_ode)
+            print(f"Planning model parameters (full): {planning_model_params.get('model_params')}")
+        else:
+            raise ValueError("Cannot determine parameter names for planning ODE")
+        print()
+    else:
+        print("Using perfect model knowledge (planning = simulation)")
+        print()
 
     # Display settings
     print(f"Initial state: {initial_state.tolist()}")
@@ -178,10 +258,10 @@ def run_mpc(
         cost_type=cost_type,
     )
 
-    # Create MPC controller
-    print("Creating MPC controller...")
+    # Create MPC controller (uses planning ODE for predictions)
+    print("Creating MPC controller with planning model...")
     mpc = MPCController(
-        ode=ode,
+        ode=planning_ode,
         config=mpc_config,
         reference_state=reference_state,
         n_controls=n_controls,
@@ -189,9 +269,9 @@ def run_mpc(
     print("MPC controller created!")
     print()
 
-    # Simulate MPC control
-    print("Simulating MPC control...")
-    times, states, controls = simulate_mpc(ode, mpc, initial_state, time_horizon, dt)
+    # Simulate MPC control (uses true ODE for actual simulation)
+    print("Simulating MPC control on true system...")
+    times, states, controls = simulate_mpc(true_ode, mpc, initial_state, time_horizon, dt)
     print(f"Simulation complete! ({len(times)} time steps)")
     print()
 
@@ -245,6 +325,14 @@ def run_mpc(
         'cost_type': cost_type,
         'ftol': ftol,
         'n_controls': n_controls,
+        # Model parameters
+        'planning_model_params': planning_model_params.get('model_params'),
+        'simulation_model_params': simulation_model_params.get('model_params'),
+        'test_model_params_override': test_model_params,  # Store the override if provided
+        # Display parameters
+        'target_vars': target_vars,
+        'state_var_names': env_config.get('state_var_names', None),
+        'control_names': env_config.get('control_names', None),
     }
 
     logger.log_config(config_dict)

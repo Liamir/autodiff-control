@@ -118,8 +118,7 @@ ENV_CONFIG = {
     'param_names': None,  # Controller parameters (will be basis function names)
     'state_var_names': ['healthy_CD4', 'infected_CD4', 'CTL_precursor', 'CTL_indep', 'CTL_dep'],
     'control_names': ['u'],
-    'target_var_idx': 1,  # Monitor infected cells
-    'target_value': 0.0,  # Want to minimize infection
+    'target_vars': {0: 8.225466, 2: 1240.011475},  # Target x1 and x3 to healthy steady state
 
     # Description for display
     'description': """HIV/AIDS Treatment with HAART Therapy

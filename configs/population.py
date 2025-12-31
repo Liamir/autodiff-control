@@ -48,7 +48,6 @@ ENV_CONFIG = {
     'create_base_ode': create_base_ode,
     'create_ode': create_ode,
     'reward_fn': reward_fn,
-    'reference_state': torch.tensor([100.0, 20.0]),  # Target critical point
 
     # Initial conditions
     'initial_state': torch.tensor([80.0, 25.0]),
@@ -70,8 +69,7 @@ ENV_CONFIG = {
     'param_names': None,  # Controller parameters (will be basis function names)
     'state_var_names': ['prey', 'predator'],
     'control_names': ['u'],
-    'target_var_idx': None,  # Target both variables
-    'target_value': None,
+    'target_vars': {0: 100.0, 1: 20.0},  # Target values for plotting: {state_idx: value}
 
     # Description for display
     'description': """Population Dynamics (Lotka-Volterra) with Static Controller

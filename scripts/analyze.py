@@ -120,6 +120,8 @@ def analyze(
 
 def analyze_training(config, history, exp_path, plot_training, plot_trajectories):
     """Analyze training experiment results."""
+    import matplotlib.pyplot as plt
+
     # Display configuration
     print("Experiment Configuration:")
     print(f"  Name: {config.get('experiment_name', 'unknown')}")
@@ -213,8 +215,81 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
         print(f"  Saved to: {exp_path / 'training.pdf'}")
         print()
 
-    # Plot trajectories
-    if plot_trajectories:
+    # Plot saved trajectory (if available)
+    trajectory_path = exp_path / 'trajectory.json'
+    if trajectory_path.exists() and plot_trajectories:
+        print("Generating trajectory plot from saved data...")
+
+        # Load trajectory
+        with open(trajectory_path, 'r') as f:
+            traj_data = json.load(f)
+
+        times = np.array(traj_data['times'])
+        states = np.array(traj_data['states'])
+        controls = np.array(traj_data['controls'])
+        reference_state = np.array(traj_data['reference_state'])
+
+        # Get variable names from config
+        config_name = config.get('config_name')
+        if config_name:
+            try:
+                env_config = load_config_module(config_name)
+                state_var_names = env_config.get('state_var_names', [f'x{i}' for i in range(states.shape[1])])
+                control_names = env_config.get('control_names', ['u'])
+            except:
+                state_var_names = [f'x{i}' for i in range(states.shape[1])]
+                control_names = ['u']
+        else:
+            state_var_names = [f'x{i}' for i in range(states.shape[1])]
+            control_names = ['u']
+
+        n_states = states.shape[1]
+        n_controls = controls.shape[1] if len(controls.shape) > 1 else 1
+
+        fig, axes = plt.subplots(n_states + 1, 1, figsize=(10, 3 * (n_states + 1)))
+        if n_states == 1:
+            axes = [axes[0], axes[1]]
+
+        # Plot states
+        for i in range(n_states):
+            ax = axes[i]
+            ax.plot(times, states[:, i], 'b-', linewidth=2, label=f'{state_var_names[i]} (trained)')
+            ax.axhline(reference_state[i], color='r', linestyle='--', alpha=0.5, label='target')
+            ax.set_xlabel('Time')
+            ax.set_ylabel(state_var_names[i])
+            ax.set_title(f'{state_var_names[i]} Evolution (Trained Controller)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.spines['right'].set_visible(False)
+            ax.spines['top'].set_visible(False)
+
+        # Plot control
+        ax = axes[-1]
+        control_times = times[:-1]  # Control is one step shorter
+        if n_controls == 1:
+            ax.plot(control_times, controls, 'g-', linewidth=2, label=control_names[0])
+        else:
+            for i in range(n_controls):
+                ax.plot(control_times, controls[:, i], linewidth=2,
+                       label=control_names[i] if i < len(control_names) else f'u{i}')
+        ax.axhline(0.0, color='k', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Control')
+        ax.set_title('Trained Controller Output')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+
+        plt.tight_layout()
+
+        filename = exp_path / 'trajectory.pdf'
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"  Saved to: {filename}")
+        print()
+
+    # Plot trajectories (comparison with uncontrolled - legacy approach)
+    elif plot_trajectories:
         print("Generating trajectory plots...")
 
         try:
@@ -251,8 +326,7 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
                 initial_state = torch.tensor(config.get('initial_state'))
                 initial_state_range = config.get('initial_state_range', None)
                 time_horizon = config.get('time_horizon', 20.0)
-                target_var_idx = config.get('target_var_idx', None)
-                target_value = config.get('target_value', None)
+                target_vars = config.get('target_vars', {})
 
                 # For controller-based ODEs, create uncontrolled version for comparison
                 if hasattr(ode_final, 'base_ode'):
@@ -263,8 +337,7 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
                         ode_final=ode_final,
                         initial_state=initial_state,
                         time_horizon=time_horizon,
-                        target_var_idx=target_var_idx,
-                        target_value=target_value,
+                        target_vars=target_vars,
                         initial_state_range=initial_state_range,
                         n_initial_states=5 if initial_state_range is not None else 1,
                         filename=str(exp_path / 'trajectories')
@@ -276,8 +349,7 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
                         ode_final=ode_final,
                         initial_state=initial_state,
                         time_horizon=time_horizon,
-                        target_var_idx=target_var_idx,
-                        target_value=target_value,
+                        target_vars=target_vars,
                         initial_state_range=initial_state_range,
                         n_initial_states=5 if initial_state_range is not None else 1,
                         filename=str(exp_path / 'trajectories')
@@ -525,8 +597,7 @@ def plot_controller(
         print(ode.get_controller_summary(state_var_names, control_names))
 
     # Get plotting parameters
-    target_var_idx = env_config.get('target_var_idx', None)
-    target_value = env_config.get('target_value', None)
+    target_vars = env_config.get('target_vars', {})
 
     # Determine output filename
     if output is None:
@@ -549,8 +620,7 @@ def plot_controller(
             ode_final=ode,
             initial_state=initial_state,
             time_horizon=time_horizon,
-            target_var_idx=target_var_idx,
-            target_value=target_value,
+            target_vars=target_vars,
             initial_state_range=initial_state_range,
             n_initial_states=n_initial_states,
             filename=output.replace('.pdf', '')
@@ -563,8 +633,7 @@ def plot_controller(
             ode_final=ode,
             initial_state=initial_state,
             time_horizon=time_horizon,
-            target_var_idx=target_var_idx,
-            target_value=target_value,
+            target_vars=target_vars,
             initial_state_range=initial_state_range,
             n_initial_states=n_initial_states,
             filename=output.replace('.pdf', '')

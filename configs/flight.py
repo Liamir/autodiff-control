@@ -108,8 +108,7 @@ ENV_CONFIG = {
     'param_names': None,  # Controller parameters (will be basis function names)
     'state_var_names': ['x1', 'x2', 'x3'],
     'control_names': ['u'],
-    'target_var_idx': 0,  # Track x1 (angle of attack)
-    'target_value': 0.0,   # Target equilibrium (or reference trajectory)
+    'target_vars': {0: 0.0},  # Target values for plotting: {state_idx: value} - only x1 matters
 
     # Description for display
     'description': """Flight Control System (F-8 Crusader)

@@ -11,8 +11,7 @@ def plot_training_comparison(
     ode_final,
     initial_state,
     time_horizon,
-    target_var_idx=None,
-    target_value=None,
+    target_vars=None,
     perturb_indices=None,
     perturb_fold_change=2.0,
     n_perturbations=10,
@@ -28,8 +27,7 @@ def plot_training_comparison(
         ode_final: ODE with final (trained) parameters
         initial_state: Initial state for simulation (base state for uncontrolled, or augmented for controlled)
         time_horizon: Simulation time
-        target_var_idx: Index of target variable (optional, for plotting target line)
-        target_value: Target value for the target variable (optional)
+        target_vars: Dict mapping state indices to target values (e.g., {0: 100.0, 1: 20.0})
         perturb_indices: Indices of fixed_params to perturb (None = no perturbation)
         perturb_fold_change: Fold change for perturbations (params multiplied by random factor in [1/fold, fold])
         n_perturbations: Number of perturbed trajectories to plot
@@ -91,9 +89,9 @@ def plot_training_comparison(
             title += f'\n{params_init_str}'
         axes[i, 0].set_title(title)
 
-        # Add target line if specified
-        if target_var_idx == i and target_value is not None:
-            axes[i, 0].axhline(y=target_value, color='red', linestyle='--',
+        # Add target line if this variable has a target
+        if target_vars is not None and i in target_vars:
+            axes[i, 0].axhline(y=target_vars[i], color='red', linestyle='--',
                              label='target', alpha=0.5)
     plt.close(fig_before)
 
@@ -125,9 +123,9 @@ def plot_training_comparison(
             title += f'\n{params_final_str}'
         axes[i, 1].set_title(title)
 
-        # Add target line if specified
-        if target_var_idx == i and target_value is not None:
-            axes[i, 1].axhline(y=target_value, color='red', linestyle='--',
+        # Add target line if this variable has a target
+        if target_vars is not None and i in target_vars:
+            axes[i, 1].axhline(y=target_vars[i], color='red', linestyle='--',
                              label='target', alpha=0.5)
     plt.close(fig_after)
 

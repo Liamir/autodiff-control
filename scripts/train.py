@@ -37,6 +37,45 @@ def load_config(config_name: str):
     return config_module.ENV_CONFIG
 
 
+def extract_model_params(ode):
+    """Extract model parameters from an ODE for logging.
+
+    Args:
+        ode: ODE instance (either direct parameter ODE or ControlledODE)
+
+    Returns:
+        dict: Dictionary with parameter names and values
+    """
+    params_dict = {}
+
+    # Check if this is a ControlledODE
+    if hasattr(ode, 'base_ode'):
+        # Controller-based ODE: extract base ODE parameters
+        base_ode = ode.base_ode
+        if hasattr(base_ode, 'fixed_params') and base_ode.fixed_params is not None:
+            param_values = base_ode.fixed_params.detach().tolist()
+            # Try to get parameter names from class attribute
+            if hasattr(base_ode.__class__, 'fixed_param_names'):
+                param_names = base_ode.__class__.fixed_param_names
+                params_dict['model_params'] = dict(zip(param_names, param_values))
+            else:
+                params_dict['model_params'] = param_values
+            params_dict['model_type'] = base_ode.__class__.__name__
+    else:
+        # Direct parameter ODE: extract fixed_params (the model parameters we don't train)
+        if hasattr(ode, 'fixed_params') and ode.fixed_params is not None:
+            param_values = ode.fixed_params.detach().tolist()
+            # Try to get parameter names from class attribute
+            if hasattr(ode.__class__, 'fixed_param_names'):
+                param_names = ode.__class__.fixed_param_names
+                params_dict['model_params'] = dict(zip(param_names, param_values))
+            else:
+                params_dict['model_params'] = param_values
+        params_dict['model_type'] = ode.__class__.__name__
+
+    return params_dict
+
+
 def train(
     config: str,
     # Training parameters
@@ -59,13 +98,15 @@ def train(
     l1_penalty_stage2: float = 0.01,
     n_iterations_stage3: int = 300,
     threshold_value_stage3: float = 1e-3,
-    # Perturbation settings
+    # Perturbation settings (for robust training)
     perturb_params: bool = False,
     perturb_fold_change: float = 2.0,
     n_param_samples_eval: int = 10,
     # Controller-specific (for static/dynamic controllers)
     controller_order: int = None,
     include_constant: bool = None,
+    # Test model parameters (for model mismatch: train on nominal, test on true)
+    test_model_params: str = None,
 ):
     """
     Generic training script for any environment configuration.
@@ -88,11 +129,14 @@ def train(
         l1_penalty_stage2: L1 penalty for stage 2
         n_iterations_stage3: Iterations for stage 3
         threshold_value_stage3: Threshold for stage 3
-        perturb_params: Whether to perturb parameters during training
-        perturb_fold_change: Fold change for parameter perturbations
+        perturb_params: Whether to perturb parameters during training (for robust training)
+        perturb_fold_change: Fold change for parameter perturbations during training
         n_param_samples_eval: Number of parameter samples per IC during evaluation
         controller_order: Polynomial order for controller (overrides default if applicable)
         include_constant: Include constant term in controller (overrides default if applicable)
+        test_model_params: JSON string of model parameters for testing (e.g., '{"a": 0.6, "b": 0.03}')
+                          If provided, controller is trained on nominal model but tested on this model.
+                          This simulates model mismatch between estimated and true systems.
     """
     set_style()
 
@@ -176,6 +220,11 @@ def train(
         ode = create_ode()
 
     print(f"ODE created: {type(ode).__name__}")
+
+    # Extract and log training model parameters
+    training_model_params = extract_model_params(ode)
+    if 'model_params' in training_model_params:
+        print(f"Training model parameters: {training_model_params['model_params']}")
     print()
 
     # Get initial state and evaluation states
@@ -234,6 +283,7 @@ def train(
         'config_name': config,
         'environment': env_config['name'],
         'experiment_name': experiment_name,
+        'method': 'training',  # Distinguish from MPC experiments
         'n_iterations': n_iterations,
         'learning_rate': learning_rate,
         'l1_penalty': l1_penalty,
@@ -256,6 +306,8 @@ def train(
         'initial_state': initial_state.tolist(),
         'initial_state_range': initial_state_range,
         'eval_initial_states': [ic.tolist() for ic in eval_initial_states],
+        # Training model parameters (ODE parameters used during training)
+        'training_model_params': training_model_params.get('model_params'),
     }
 
     # Add controller-specific config
@@ -263,15 +315,19 @@ def train(
         config_dict['controller_order'] = controller_order
         config_dict['include_constant'] = include_constant
 
-    # Add plotting and display parameters (for analysis script)
-    config_dict['target_var_idx'] = env_config.get('target_var_idx', None)
-    config_dict['target_value'] = env_config.get('target_value', None)
+    # Add display parameters (for analysis script)
+    config_dict['target_vars'] = env_config.get('target_vars', {})
     config_dict['state_var_names'] = env_config.get('state_var_names', None)
     config_dict['control_names'] = env_config.get('control_names', None)
     config_dict['param_names'] = env_config.get('param_names', None)
 
     logger.log_config(config_dict)
 
+    # ========== TRAINING PHASE ==========
+    print("="*60)
+    print("TRAINING PHASE")
+    print("="*60)
+    print()
     print("Starting training...")
     print(f"Time horizon: {time_horizon}")
     print(f"Learning rate: {learning_rate}")
@@ -331,6 +387,155 @@ def train(
             summary['best_eval_reward'] = max(eval_rewards)
 
     logger.log_results(summary, param_summary)
+
+    # ========== TESTING PHASE ==========
+    print()
+    print("="*60)
+    print("TESTING PHASE")
+    print("="*60)
+    print()
+
+    # Create test ODE (might be different from training ODE if test_model_params provided)
+    import json as json_module
+    test_ode = ode  # Default: use training ODE
+    testing_model_params = training_model_params  # Default: same as training
+
+    if test_model_params is not None:
+        print("Creating test ODE with different model parameters...")
+        # Parse test model params (fire may pass it as dict or string)
+        if isinstance(test_model_params, str):
+            test_params_dict = json_module.loads(test_model_params)
+        else:
+            test_params_dict = test_model_params
+        print(f"Test model parameters: {test_params_dict}")
+
+        # Create new ODE with test parameters
+        if hasattr(ode, 'base_ode'):
+            # Controller-based ODE: need to replace base ODE parameters
+            base_ode = ode.base_ode
+
+            # Get param names and create new tensor
+            if hasattr(base_ode.__class__, 'fixed_param_names'):
+                param_names_list = base_ode.__class__.fixed_param_names
+                # Build new param tensor from test_params_dict
+                new_params = []
+                for pname in param_names_list:
+                    if pname in test_params_dict:
+                        new_params.append(test_params_dict[pname])
+                    else:
+                        # Use original value if not specified in test
+                        idx = param_names_list.index(pname)
+                        new_params.append(base_ode.fixed_params[idx].item())
+                new_fixed_params = torch.tensor(new_params)
+
+                # Create new base ODE with test parameters
+                base_ode.fixed_params = new_fixed_params
+
+                # Create new controlled ODE with same controller but updated base ODE
+                from rpa_control.controllers import ControlledODE
+                test_ode = ControlledODE(
+                    base_ode=base_ode,
+                    controller=ode.controller,  # Same controller (trained)
+                    control_indices=ode.control_indices
+                )
+            else:
+                raise ValueError("Cannot determine parameter names for test ODE")
+        else:
+            # Direct parameter ODE: replace fixed_params
+            if hasattr(ode.__class__, 'fixed_param_names'):
+                param_names_list = ode.__class__.fixed_param_names
+                # Build new param tensor
+                new_params = []
+                for pname in param_names_list:
+                    if pname in test_params_dict:
+                        new_params.append(test_params_dict[pname])
+                    else:
+                        idx = param_names_list.index(pname)
+                        new_params.append(ode.fixed_params[idx].item())
+                new_fixed_params = torch.tensor(new_params)
+
+                # Create new ODE with test parameters
+                create_ode_func = env_config['create_ode']
+                test_ode = create_ode_func(
+                    differentiable_params=ode.differentiable_params.detach().clone(),
+                    fixed_params=new_fixed_params
+                )
+            else:
+                raise ValueError("Cannot determine parameter names for test ODE")
+
+        # Extract and log testing model parameters
+        testing_model_params = extract_model_params(test_ode)
+        print(f"Testing with model parameters: {testing_model_params.get('model_params')}")
+        print()
+    else:
+        print("Testing with same model parameters as training (no model mismatch)")
+        print()
+
+    # Log testing model params to config
+    config_dict['testing_model_params'] = testing_model_params.get('model_params')
+    config_dict['test_model_params_override'] = test_model_params  # Store the override if provided
+
+    # Re-save config with testing params
+    import json
+    config_path = logger.get_experiment_path() / 'config.json'
+    with open(config_path, 'w') as f:
+        json.dump(config_dict, f, indent=2)
+
+    # Simulate and save trajectory with best controller on test ODE
+    print("Simulating trajectory with best controller on test model...")
+    from torchdiffeq import odeint
+
+    # Simulate full trajectory
+    t_span = torch.linspace(0, time_horizon, env.n_reward_steps + 1)
+
+    # Augment initial state with controller states if needed
+    if hasattr(test_ode, 'controller') and hasattr(test_ode.controller, 'n_controller_states'):
+        n_controller_states = test_ode.controller.n_controller_states
+        controller_init = torch.zeros(n_controller_states)
+        initial_state_full = torch.cat([initial_state, controller_init])
+    else:
+        initial_state_full = initial_state
+
+    # Integrate using test ODE
+    with torch.no_grad():
+        states_full = odeint(test_ode, initial_state_full, t_span, method='dopri5')
+
+    # Extract base states (without controller states)
+    n_base = len(initial_state)
+    states_base = states_full[:, :n_base]
+
+    # Compute control inputs at each time step
+    controls = []
+    with torch.no_grad():
+        for state in states_full[:-1]:  # Exclude last time point
+            if hasattr(test_ode, 'controller'):
+                u = test_ode.controller(state[:n_base])
+            else:
+                u = torch.zeros(1)  # No controller
+            controls.append(u)
+    controls = torch.stack(controls)
+
+    # Construct reference_state from target_vars
+    # Only variables in target_vars contribute to tracking error; others are zero
+    target_vars = env_config.get('target_vars', {})
+    reference_state = torch.zeros_like(initial_state)
+    for idx, value in target_vars.items():
+        reference_state[idx] = value
+
+    trajectory_data = {
+        'times': t_span.tolist(),
+        'states': states_base.tolist(),
+        'controls': controls.tolist(),
+        'reference_state': reference_state.tolist(),
+    }
+
+    import json
+    trajectory_path = logger.get_experiment_path() / 'trajectory.json'
+    with open(trajectory_path, 'w') as f:
+        json.dump(trajectory_data, f, indent=2)
+
+    print(f"Trajectory saved to: {trajectory_path}")
+    print()
 
     print("Results saved. Use scripts/analyze.py to view detailed results and generate plots.")
     print()

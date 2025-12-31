@@ -50,8 +50,7 @@ ENV_CONFIG = {
     # Display settings
     'param_names': ['alpha1', 'alpha2', 'alpha3'],
     'state_var_names': ['A', 'B'],
-    'target_var_idx': 1,  # B is the target
-    'target_value': 1.0,
+    'target_vars': {1: 1.0},  # Target values for plotting: {state_idx: value} - B should reach 1.0
 
     # Description for display
     'description': """AB Gene Regulatory Network

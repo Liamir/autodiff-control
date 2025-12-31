@@ -51,29 +51,37 @@ This ensures fair comparison across parameters regardless of state variable magn
 ```
 autodiff-control/
 ├── scripts/
-│   ├── train.py              # Generic training script
-│   └── analyze.py            # Analysis and plotting
+│   ├── train.py                  # Generic training script
+│   ├── run_mpc.py                # MPC control simulation
+│   ├── compare_trajectories.py  # Compare any two experiments
+│   └── analyze.py                # Analysis and plotting
 ├── configs/
-│   ├── population.py         # Lotka-Volterra system
-│   ├── flight.py             # Flight control
-│   └── hiv.py                # HIV treatment model
+│   ├── population.py             # Lotka-Volterra system
+│   ├── flight.py                 # Flight control
+│   ├── hiv.py                    # HIV treatment model
+│   └── ab_circuit.py             # AB gene regulatory network
 ├── src/rpa_control/
 │   ├── controllers/
-│   │   ├── static.py         # Static state feedback controller
-│   │   └── dynamic.py        # Dynamic controller with internal state
+│   │   ├── static.py             # Static state feedback controller
+│   │   ├── dynamic.py            # Dynamic controller with internal state
+│   │   └── controlled_ode.py    # ODE wrapper with controller
 │   ├── optimization/
-│   │   └── gradient.py       # Gradient-based training with sparsification
+│   │   └── gradient.py           # Gradient-based training with sparsification
+│   ├── mpc/
+│   │   └── controller.py         # Model Predictive Control
 │   └── utils/
-│       ├── plotting.py       # Visualization utilities
-│       └── logging.py        # Experiment logging (full precision)
-└── logs/                     # Training outputs (auto-generated)
+│       ├── plotting.py           # Visualization utilities
+│       └── logging.py            # Experiment logging (full precision)
+└── logs/                         # Experiment outputs (auto-generated)
     └── experiment_name_timestamp/
-        ├── config.json       # Full configuration
-        ├── history.json      # Training history (full precision)
-        ├── results.txt       # Summary and controller equations
-        ├── console.log       # Training output
-        ├── training.pdf      # Training curves
-        └── trajectories.pdf  # Trajectory plots
+        ├── config.json           # Full configuration (includes model params)
+        ├── history.json          # Training history (full precision, training only)
+        ├── results.txt           # Summary and controller equations
+        ├── console.log           # Complete console output
+        ├── trajectory.json       # Saved trajectory (training/MPC)
+        ├── mpc_trajectory.json   # MPC trajectory (MPC only)
+        ├── training.pdf          # Training curves (analysis)
+        └── trajectories.pdf      # Trajectory plots (analysis)
 ```
 
 ## Installation
@@ -142,10 +150,10 @@ history = train_ode_parameters(env, controlled_ode, config=config)
 **Training** (saves all results to logs directory):
 ```bash
 # Train on any config
-python scripts/train.py --config population --n_iterations 1000
+python scripts/train.py population --n_iterations 1000
 
 # With three-stage training
-python scripts/train.py --config population \
+python scripts/train.py population \
     --use_three_stage True \
     --n_iterations_stage1 500 \
     --n_iterations_stage2 300 \
@@ -153,9 +161,49 @@ python scripts/train.py --config population \
     --l1_penalty_stage2 0.01
 
 # With scale-aware regularization
-python scripts/train.py --config population \
+python scripts/train.py population \
     --scale_aware_regularization True \
     --l1_penalty 0.01
+```
+
+**Model Mismatch Testing** (train on nominal model, test on true system):
+```bash
+# Train controller with perfect model knowledge
+python scripts/train.py population --n_iterations 1000
+
+# Train on nominal model but test on different parameters (model mismatch)
+python scripts/train.py population --n_iterations 1000 \
+    --test_model_params '{"a": 0.6, "b": 0.03}'
+```
+
+This tests controller robustness when the training model differs from the true system. The controller is trained using gradient-based optimization on the nominal model, but the final trajectory is simulated on the true model with different parameters.
+
+**MPC (Model Predictive Control)**:
+```bash
+# Run MPC with perfect model knowledge
+python scripts/run_mpc.py population --time_horizon 20
+
+# Run MPC with imperfect model knowledge (planning model != true system)
+python scripts/run_mpc.py population --time_horizon 20 \
+    --test_model_params '{"a": 0.4, "b": 0.02}'
+```
+
+MPC uses the planning model for internal predictions/optimization, but the true system (always the default parameters from config) for actual simulation. This tests how well MPC handles model uncertainty.
+
+**Compare Trajectories** (compare any two experiments):
+```bash
+# Compare MPC vs trained controller
+python scripts/compare_trajectories.py \
+    logs/population_static_mpc_20251231_154654 \
+    logs/population_static_20251231_145238 \
+    --output comparison.pdf
+
+# Compare perfect vs imperfect model knowledge
+python scripts/compare_trajectories.py \
+    logs/experiment1 logs/experiment2 \
+    --label1 "Perfect model" \
+    --label2 "Model mismatch" \
+    --output comparison.pdf
 ```
 
 **Analysis** (view results and generate plots):
@@ -207,28 +255,121 @@ Modern approach for learning sparse controllers:
 
 Older approach using iterative threshold-retrain cycles. Replaced by three-stage pipeline.
 
+## Model Mismatch Testing
+
+Both training and MPC support testing controller robustness to model uncertainty:
+
+### Training with Model Mismatch
+
+**Architecture**:
+- **TRAINING PHASE**: Controller parameters optimized using nominal/estimated model
+- **TESTING PHASE**: Trained controller evaluated on true system with different parameters
+
+**Logged Information**:
+```json
+{
+  "training_model_params": {"a": 0.5, "b": 0.025, "c": 0.5, "d": 0.005},
+  "testing_model_params": {"a": 0.6, "b": 0.03, "c": 0.5, "d": 0.005},
+  "test_model_params_override": {"a": 0.6, "b": 0.03}
+}
+```
+
+The saved trajectory (`trajectory.json`) is simulated using the **testing model** (true system).
+
+### MPC with Model Mismatch
+
+**Architecture**:
+- **Planning ODE**: Model used inside MPC for predictions and optimization
+- **Simulation ODE**: True system used for actual state evolution
+
+When `--test_model_params` is provided:
+- **Planning model**: Has incorrect parameters (what MPC thinks)
+- **Simulation model**: Always uses default config parameters (the true system)
+
+**Logged Information**:
+```json
+{
+  "planning_model_params": {"a": 0.4, "b": 0.02, "c": 0.5, "d": 0.005},
+  "simulation_model_params": {"a": 0.5, "b": 0.025, "c": 0.5, "d": 0.005},
+  "test_model_params_override": {"a": 0.4, "b": 0.02}
+}
+```
+
+This tests how well MPC's closed-loop feedback compensates for model errors.
+
+## Target Variables System
+
+The `target_vars` dictionary specifies which state variables to track and their target values:
+
+```python
+# Population: track both prey and predator
+'target_vars': {0: 100.0, 1: 20.0}
+
+# Flight: only track x1 (angle of attack), x2 and x3 are free
+'target_vars': {0: 0.0}
+
+# HIV: track x1 (healthy CD4+) and x3 (CTL precursor)
+'target_vars': {0: 8.225466, 2: 1240.011475}
+```
+
+**Key Properties**:
+- Only variables in `target_vars` contribute to tracking error/cost
+- Other variables don't affect cost (completely free)
+- Reference state is automatically constructed from `target_vars` (non-specified indices are zero)
+- Used for both cost computation and plotting reference lines
+
+**Example**:
+```python
+target_vars = {0: 100.0, 1: 20.0}  # Track prey and predator
+# Constructs: reference_state = [100.0, 20.0]
+# Cost: (prey - 100)² + (predator - 20)²
+
+target_vars = {0: 0.0}  # Only track x1
+# Constructs: reference_state = [0.0, 0.0, 0.0]
+# Cost: (x1 - 0)², x2 and x3 ignored
+```
+
 ## Recent Progress
 
 ### Latest Improvements
 
-**Basis Normalization** (commit 608c4a5)
+**Model Mismatch Testing**
+- Train/test phase separation in `train.py`: optimize on nominal model, evaluate on true system
+- MPC planning/simulation separation: MPC plans with imperfect model, simulates on true system
+- Full model parameter logging for both training and testing phases
+- Enables evaluation of controller robustness to model uncertainty
+
+**Target Variables System**
+- Replaced `target_var_idx`, `target_value`, and `reference_state` with unified `target_vars` dict
+- Supports selective tracking: only specified state variables contribute to cost
+- Automatic reference state construction from `target_vars`
+- Flexible for multi-variable tracking (e.g., HIV: track x1 and x3, ignore x2, x4, x5)
+
+**MPC Integration**
+- Generic MPC script (`run_mpc.py`) works with any environment config
+- Integrated with same logging infrastructure as training
+- Trajectory comparison tool for MPC vs training experiments
+- Support for model mismatch testing (planning vs simulation model)
+
+**Workflow Improvements**
+- Trajectory saving for both training and MPC (unified format)
+- Generic comparison tool (`compare_trajectories.py`) for any two experiments
+- Comprehensive config logging with model parameters and target variables
+- Full precision data storage throughout pipeline
+
+**Basis Normalization**
 - Normalize basis functions by RMS for numerical stability
 - Enables fair L1 penalties across different scales
 - Improves convergence and sparsity quality
 
-**Three-Stage Pipeline** (commit 4ff2a35)
+**Three-Stage Pipeline**
 - More reliable sparsification than iterative LS
 - Uses sparsest parameters from stage 2 (not best-reward)
 - Better exploration-exploitation tradeoff
 
-**Generic Controller Framework** (commit d31283f)
-- Unified parameter naming (observing/actuating)
-- Consistent controller summaries
-- Support for both static and dynamic controllers
-
-**Scale-Aware Regularization** (commit 38b9c0f)
+**Scale-Aware Regularization**
 - Address multi-scale systems (variables spanning orders of magnitude)
-- Approach 1: Normalize basis in forward pass, uniform L1 on scaled params
+- Normalize basis in forward pass, uniform L1 on scaled params
 - Essential for systems like population dynamics
 
 ## Controller Parameter Naming
