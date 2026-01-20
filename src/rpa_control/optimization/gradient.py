@@ -18,9 +18,6 @@ class TrainingConfig:
     perturb_fold_change: float = 2.0  # Perturb params by random factor in [1/fold, fold]
     scale_aware_regularization: bool = False  # Normalize basis functions by their RMS for numerical stability
     reg_scale_update_interval: int = 0  # Update basis scales every N iterations (0 = only compute once at start)
-    # Learning rate warmup
-    warmup_iterations: int = 0  # Number of iterations for LR warmup (0 = no warmup)
-    warmup_start_factor: float = 0.01  # Starting LR = learning_rate * warmup_start_factor
     # Gradient clipping
     gradient_clip_norm: float = 0.0  # Max gradient norm (0 = no clipping)
     # Evaluation on fixed initial conditions
@@ -28,7 +25,7 @@ class TrainingConfig:
     eval_initial_states: Optional[List[torch.Tensor]] = None  # Fixed ICs for evaluation (None = no evaluation)
     n_param_samples_eval: int = 10  # Number of parameter samples per IC during evaluation (only used if perturb_param_indices is set)
     # Truncated Backpropagation Through Time (TBPTT)
-    use_tbptt: bool = True  # Enable truncated backprop (reduces gradient computation length)
+    use_tbptt: bool = False  # Enable truncated backprop (reduces gradient computation length)
     tbptt_truncation_steps: int = 5  # Number of time steps to backprop through (0 = full BPTT)
     # Three-stage training pipeline (improved alternative to iterative LS)
     use_three_stage: bool = False  # Enable 3-stage: normal → L1 regularization → thresholding
@@ -301,19 +298,6 @@ def _train_single_round(
                 config.eval_initial_states is not None and
                 len(config.eval_initial_states) > 0)
 
-    # Setup learning rate scheduler for warmup
-    scheduler = None
-    if config.warmup_iterations > 0:
-        def lr_lambda(iteration):
-            if iteration < config.warmup_iterations:
-                # Linear warmup from warmup_start_factor to 1.0
-                return config.warmup_start_factor + (1.0 - config.warmup_start_factor) * iteration / config.warmup_iterations
-            else:
-                # After warmup, keep at 1.0 (full learning rate)
-                return 1.0
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
     for iteration in range(config.n_iterations):
         optimizer.zero_grad()
 
@@ -562,10 +546,6 @@ def _train_single_round(
 
         optimizer.step()
 
-        # Update learning rate if warmup scheduler is active
-        if scheduler is not None:
-            scheduler.step()
-
         # Apply mask to parameters if provided
         if param_mask is not None:
             params.data = params.data * param_mask.float()
@@ -596,10 +576,6 @@ def _train_single_round(
             # Add eval reward if available
             if current_eval_reward is not None:
                 log_msg += f" | Eval: {current_eval_reward:8.3f}"
-            # Show current learning rate during warmup
-            if scheduler is not None and iteration < config.warmup_iterations:
-                current_lr = optimizer.param_groups[0]['lr']
-                log_msg += f" | LR: {current_lr:.2e}"
             log_msg += f" | Params: {params_str}"
             if perturbed_factors is not None:
                 factors_str = "[" + ", ".join([f"{f:.2f}x" for f in perturbed_factors]) + "]"

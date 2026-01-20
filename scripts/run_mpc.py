@@ -60,6 +60,8 @@ def extract_model_params(ode):
 
 def run_mpc(
     config: str,
+    # Experiment naming
+    name: str = None,
     # Simulation settings
     initial_state: str = None,
     time_horizon: float = None,
@@ -73,14 +75,15 @@ def run_mpc(
     u_max: float = None,
     cost_type: str = None,
     ftol: float = None,
-    # Test model parameters (for model mismatch: plan with nominal, simulate with true)
-    test_model_params: str = None,
+    # Estimated model parameters (for model mismatch: plan with estimated, simulate with true)
+    estimated_model_params: str = None,
 ):
     """
     Run MPC on any environment configuration and save results to logs.
 
     Args:
         config: Name of config file (e.g., 'population', 'flight')
+        name: Custom experiment name suffix for easy identification (e.g., 'high_Q', 'long_horizon')
         initial_state: Initial state as string (e.g., "[80, 25]", default: from config)
         time_horizon: Simulation time horizon (default: from config)
         prediction_horizon: MPC prediction horizon (default: from config)
@@ -92,9 +95,10 @@ def run_mpc(
         u_max: Maximum control input (default: from config)
         cost_type: Cost function type ('quadratic' or 'l1', default: from config)
         ftol: Optimization tolerance (default: from config)
-        test_model_params: JSON string of model parameters for simulation (e.g., '{"a": 0.6, "b": 0.03}')
-                          If provided, MPC uses nominal model for planning but true model for simulation.
-                          This simulates model mismatch between estimated and true systems.
+        estimated_model_params: JSON string of model parameters for planning (e.g., '{"a": 0.6, "b": 0.03}')
+                               If provided, MPC uses this estimated/incorrect model for planning
+                               but the true model (config defaults) for simulation. This simulates
+                               model mismatch where MPC has imperfect model knowledge.
     """
     set_style()
 
@@ -103,6 +107,8 @@ def run_mpc(
 
     # Create experiment logger
     experiment_name = env_config.get('experiment_name', env_config['name']) + '_mpc'
+    if name:
+        experiment_name = f"{experiment_name}_{name}"
     logger = ExperimentLogger(
         log_dir="logs",
         experiment_name=experiment_name
@@ -192,23 +198,23 @@ def run_mpc(
     planning_ode = true_ode  # Default: assume perfect model knowledge
     planning_model_params = simulation_model_params  # Default: same as true system
 
-    if test_model_params is not None:
-        print("Creating planning ODE with different model parameters (imperfect knowledge)...")
-        # Parse test model params (fire may pass it as dict or string)
-        if isinstance(test_model_params, str):
-            test_params_dict = json_module.loads(test_model_params)
+    if estimated_model_params is not None:
+        print("Creating planning ODE with estimated model parameters (imperfect knowledge)...")
+        # Parse estimated model params (fire may pass it as dict or string)
+        if isinstance(estimated_model_params, str):
+            estimated_params_dict = json_module.loads(estimated_model_params)
         else:
-            test_params_dict = test_model_params
-        print(f"Planning model parameters (what MPC thinks): {test_params_dict}")
+            estimated_params_dict = estimated_model_params
+        print(f"Estimated model parameters (what MPC thinks): {estimated_params_dict}")
 
         # Get param names and create new tensor
         if hasattr(true_ode.__class__, 'fixed_param_names'):
             param_names_list = true_ode.__class__.fixed_param_names
-            # Build new param tensor from test_params_dict
+            # Build new param tensor from estimated_params_dict
             new_params = []
             for pname in param_names_list:
-                if pname in test_params_dict:
-                    new_params.append(test_params_dict[pname])
+                if pname in estimated_params_dict:
+                    new_params.append(estimated_params_dict[pname])
                 else:
                     # Use true value if not specified
                     idx = param_names_list.index(pname)
@@ -328,7 +334,7 @@ def run_mpc(
         # Model parameters
         'planning_model_params': planning_model_params.get('model_params'),
         'simulation_model_params': simulation_model_params.get('model_params'),
-        'test_model_params_override': test_model_params,  # Store the override if provided
+        'estimated_model_params_override': estimated_model_params,  # Store the override if provided
         # Display parameters
         'target_vars': target_vars,
         'state_var_names': env_config.get('state_var_names', None),

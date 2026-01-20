@@ -396,7 +396,6 @@ target_vars = {0: 0.0}  # Only track x1
 - `scale_aware_regularization`: Enable basis normalization (default: False)
 - `steady_state_fraction`: Skip initial transient (0.0 = use all trajectory)
 - `gradient_clip_norm`: Gradient clipping (0 = disabled)
-- `warmup_iterations`: LR warmup steps (default: 0)
 
 **Three-Stage Training**:
 - `use_three_stage`: Enable three-stage pipeline (default: False)

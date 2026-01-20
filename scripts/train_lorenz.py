@@ -30,9 +30,6 @@ def train_lorenz_controller(
     controller_order: int = 1,
     # Scale-aware regularization
     scale_aware_regularization: bool = False,
-    # Learning rate warmup
-    warmup_iterations: int = 0,
-    warmup_start_factor: float = 0.01,
     # Gradient clipping
     gradient_clip_norm: float = 0.0,
     # Three-stage training
@@ -57,8 +54,6 @@ def train_lorenz_controller(
         steady_state_fraction: Fraction of trajectory to skip before computing reward
         controller_order: Polynomial order for controller basis functions
         scale_aware_regularization: Use basis normalization
-        warmup_iterations: Number of iterations for LR warmup (0 = no warmup)
-        warmup_start_factor: Starting LR = learning_rate * warmup_start_factor
         gradient_clip_norm: Max gradient norm for clipping (0 = no clipping)
         use_three_stage: Use 3-stage training: normal → L1 reg → thresholding
         n_iterations_stage1: Iterations for stage 1
@@ -130,8 +125,6 @@ def train_lorenz_controller(
         verbose=True,
         steady_state_fraction=steady_state_fraction,
         scale_aware_regularization=scale_aware_regularization,
-        warmup_iterations=warmup_iterations,
-        warmup_start_factor=warmup_start_factor,
         gradient_clip_norm=gradient_clip_norm,
         use_three_stage=use_three_stage,
         n_iterations_stage1=n_iterations_stage1,
@@ -144,8 +137,6 @@ def train_lorenz_controller(
     print("Starting training...")
     print(f"Time horizon: {time_horizon}")
     print(f"Learning rate: {learning_rate}")
-    if warmup_iterations > 0:
-        print(f"Learning rate warmup: {warmup_iterations} iterations ({warmup_start_factor * learning_rate:.2e} → {learning_rate:.2e})")
     if gradient_clip_norm > 0:
         print(f"Gradient clipping: max_norm={gradient_clip_norm}")
     print(f"Iterations: {n_iterations}")
