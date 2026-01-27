@@ -26,6 +26,7 @@ def create_ode(differentiable_params=None, fixed_params=None):
 ENV_CONFIG = {
     'name': 'ab_circuit',
     'experiment_name': 'circuit_ab',
+    'has_controller': False,  # This is circuit design (learning ODE params directly)
 
     # ODE setup
     'create_ode': create_ode,

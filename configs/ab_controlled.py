@@ -71,6 +71,7 @@ def create_ode(controller_order=2, include_constant=True):
 ENV_CONFIG = {
     'name': 'ab_controlled',
     'experiment_name': 'ab_controlled_static',
+    'has_controller': True,  # This is a control problem
 
     # ODE setup
     'create_base_ode': create_base_ode,

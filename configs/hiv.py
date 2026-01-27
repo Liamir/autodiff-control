@@ -95,6 +95,7 @@ def create_ode(controller_order=2, include_constant=True):
 ENV_CONFIG = {
     'name': 'hiv',
     'experiment_name': 'hiv_static',
+    'has_controller': True,  # This is a control problem
 
     # ODE setup
     'create_ode': create_ode,

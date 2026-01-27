@@ -47,6 +47,7 @@ def create_ode(controller_order=2, include_constant=True):
 ENV_CONFIG = {
     'name': 'lorenz',
     'experiment_name': 'lorenz_static',
+    'has_controller': True,  # This is a control problem
 
     # ODE setup
     'create_base_ode': create_base_ode,
