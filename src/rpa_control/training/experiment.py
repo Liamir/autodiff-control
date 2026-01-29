@@ -246,6 +246,8 @@ def create_training_config(
     l1_penalty_stage2: float = 0.01,
     n_iterations_stage3: int = 300,
     threshold_value_stage3: float = 1e-3,
+    use_tbptt: bool = False,
+    tbptt_truncation_steps: int = 5,
 ):
     """Create training configuration.
 
@@ -268,6 +270,8 @@ def create_training_config(
         l1_penalty_stage2: Stage 2 L1 penalty
         n_iterations_stage3: Stage 3 iterations
         threshold_value_stage3: Stage 3 threshold
+        use_tbptt: Enable truncated backpropagation through time
+        tbptt_truncation_steps: Number of steps to backprop through
 
     Returns:
         TrainingConfig instance
@@ -291,4 +295,6 @@ def create_training_config(
         l1_penalty_stage2=l1_penalty_stage2,
         n_iterations_stage3=n_iterations_stage3,
         threshold_value_stage3=threshold_value_stage3,
+        use_tbptt=use_tbptt,
+        tbptt_truncation_steps=tbptt_truncation_steps,
     )

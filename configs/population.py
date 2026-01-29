@@ -91,7 +91,7 @@ Parameters:
 
     # Default training settings
     'defaults': {
-        'time_horizon': 20.0,
+        'time_horizon': 50.0,
         'n_reward_steps': 100,
         'steady_state_fraction': 0.5,
         'learning_rate': 0.1,

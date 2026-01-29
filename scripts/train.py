@@ -119,6 +119,9 @@ def train(
     l1_penalty_stage2: float = 0.01,
     n_iterations_stage3: int = 300,
     threshold_value_stage3: float = 1e-3,
+    # TBPTT (Truncated Backpropagation Through Time)
+    use_tbptt: bool = False,
+    tbptt_truncation_steps: int = 5,
     # Perturbation settings (for robust training)
     perturb_params: bool = False,
     perturb_fold_change: float = 2.0,
@@ -317,6 +320,8 @@ def train(
         l1_penalty_stage2=l1_penalty_stage2,
         n_iterations_stage3=n_iterations_stage3,
         threshold_value_stage3=threshold_value_stage3,
+        use_tbptt=use_tbptt,
+        tbptt_truncation_steps=tbptt_truncation_steps,
     )
 
     # Log configuration
@@ -339,6 +344,8 @@ def train(
         'l1_penalty_stage2': l1_penalty_stage2,
         'n_iterations_stage3': n_iterations_stage3,
         'threshold_value_stage3': threshold_value_stage3,
+        'use_tbptt': use_tbptt,
+        'tbptt_truncation_steps': tbptt_truncation_steps,
         'perturb_params': perturb_params,
         'perturb_param_indices': perturb_param_indices,
         'perturb_fold_change': perturb_fold_change,

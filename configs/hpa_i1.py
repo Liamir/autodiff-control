@@ -7,26 +7,25 @@ The HPA model has 5 state variables and 9 control inputs:
     States: [CRH, ACTH, Cortisol, Pituitary, Adrenal]
     Controls: [I1, I2, I3, C1, C2, C3, A1, A2, A3]
 
-Scenario:
+Example Scenario:
     - Days 0-50: Baseline stress (u=1)
     - Days 50-150: Chronic stress (u=2)
     - Days 150+: Treatment phase (I1 controller active, u=2 continues)
 
-Goal: Restore Cortisol to 1.0 using only I1.
+Goal: Restore Cortisol to 1.0 using only I1. Should be possible according to the paper.
 """
 import torch
 from rpasim.ode.rpa.hpa import HPA
 from rpa_control.controllers import StaticController
 
 
-# Stressor protocol parameters (scaled to 50-day horizon)
-# Original 250 days: 0-50 baseline, 50-150 stress, 150-250 treatment
-# Scaled to 50 days: 0-10 baseline, 10-30 stress, 30-50 treatment
-BASELINE_END = 10.0      # End of baseline period (days)
-STRESS_START = 10.0      # Start of chronic stress (days)
-TREATMENT_START = 30.0   # Start of treatment (days)
+BASELINE_END = 0.0      # End of baseline period (days)
+STRESS_START = 0.0      # Start of chronic stress (days)
+TREATMENT_START = 0.0   # Start of treatment (days)
 BASELINE_STRESS = 1.0    # Normal stressor level
 CHRONIC_STRESS = 2.0     # Elevated stressor level
+# initial state after 50 days of baseline stress and 200 days of chronic stress
+HIGH_CORTISOL_IC = torch.tensor([0.981693, 0.996662, 1.853058, 1.116182, 1.859223], dtype=torch.float32)
 
 # Which controls are active (learnable). Others fixed at 1.0.
 # Control order: [I1, I2, I3, C1, C2, C3, A1, A2, A3]
@@ -135,8 +134,8 @@ def create_ode(controller_order=2, include_constant=True):
     # Number of active controls (just I1)
     n_active = len(ACTIVE_CONTROLS)
 
-    # Initialize controller to output 1.0 by default (use float64 to match state dtype)
-    initial_params = torch.zeros(n_active, n_basis, dtype=torch.float64)
+    # Initialize controller to output 1.0 by default
+    initial_params = torch.zeros(n_active, n_basis, dtype=torch.float32)
     if include_constant:
         initial_params[:, 0] = 1.0  # Constant term
 
@@ -173,12 +172,13 @@ ENV_CONFIG = {
     'reward_fn': reward_fn,
 
     # Initial conditions - all states start at 1.0
-    'initial_state': torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float64),
+    # initial state after 50 days of baseline stress and 200 days of chronic stress
+    'initial_state': HIGH_CORTISOL_IC,
     'initial_state_range': None,  # Single IC only
 
     # Fixed evaluation initial conditions
     'eval_initial_states': [
-        torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float64),  # Target state
+        torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float32),  # Target state
     ],
 
     # Perturbation settings (for ODE parameters)
@@ -216,7 +216,7 @@ Control objective: restore Cortisol to 1.0 using only I1""",
     # Default training settings
     'defaults': {
         'time_horizon': 50.0,  # Reduced for testing (baseline only)
-        'n_reward_steps': 50,
+        'n_reward_steps': 100,
         'steady_state_fraction': 0.2,  # Track last 10 days (second half of treatment, days 40-50)
         'learning_rate': 0.1,
         'n_iterations': 500,
@@ -224,7 +224,7 @@ Control objective: restore Cortisol to 1.0 using only I1""",
         'eval_interval': 50,
         'controller_order': 2,
         'scale_aware_regularization': True,
-        'state_limits': None,  # Disabled - event handling requires step_size
+        'state_limits': (0.0, 100.0),
         'seed': 42,
         'use_single_ic': True,
     },

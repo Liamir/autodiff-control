@@ -1,5 +1,6 @@
 """Core training loop for one stage of optimization."""
 import torch
+import time
 from typing import Callable, Optional, Dict, Any, List, Tuple
 from .config import TrainingConfig
 from .evaluation import evaluate_controller
@@ -62,7 +63,26 @@ def one_stage_training(
                 config.eval_initial_states is not None and
                 len(config.eval_initial_states) > 0)
 
+    # Timing accumulators
+    timing_stats = {
+        'forward': 0.0,
+        'control_stats': 0.0,
+        'regularization': 0.0,
+        'evaluation': 0.0,
+        'backward': 0.0,
+        'optimizer': 0.0,
+        'logging': 0.0,
+        'total': 0.0,
+    }
+    # NFE (Number of Function Evaluations) accumulators
+    nfe_stats = {
+        'forward': 0,
+        'total_calls': 0,
+    }
+    timing_report_interval = max(50, config.log_interval)
+
     for iteration in range(config.n_iterations):
+        iter_start = time.time()
         optimizer.zero_grad()
 
         # Reset environment
@@ -88,6 +108,7 @@ def one_stage_training(
         # Run simulation with optional TBPTT
         time_horizon = env.time_horizon if hasattr(env, 'time_horizon') else 10.0
 
+        forward_start = time.time()
         if config.use_tbptt and config.tbptt_truncation_steps > 0:
             # Truncated BPTT: simulate in chunks and detach between chunks
             # This prevents gradients from flowing too far back in time
@@ -112,6 +133,7 @@ def one_stage_training(
             all_times = []
             all_states = []
             all_rewards = []
+            total_nfe_forward = 0
 
             # Initial state
             current_state = state.clone()
@@ -157,8 +179,9 @@ def one_stage_training(
                     print(f"[DEBUG] Chunk {chunk_idx}: chunk_reward={chunk_reward.item() if torch.is_tensor(chunk_reward) else chunk_reward:.2e}, chunk_reward.requires_grad={chunk_reward.requires_grad if torch.is_tensor(chunk_reward) else 'N/A'}")
                     print(f"[DEBUG] Chunk {chunk_idx}: final_state={current_state.detach().numpy()}, has_nan={torch.isnan(current_state).any().item()}")
 
-                # Accumulate reward
+                # Accumulate reward and NFE
                 total_reward = total_reward + chunk_reward
+                total_nfe_forward += info.get('nfe_forward', 0)
 
                 # Collect trajectory for debugging/metrics
                 times, states, rewards = env.get_trajectory()
@@ -183,7 +206,10 @@ def one_stage_training(
 
         else:
             # Standard full BPTT: single simulation through full time horizon
+            print(f"BEFORE FULL SIMULATION iteration {iteration}")
             obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
+            print(f"AFTER FULL SIMULATION iteration {iteration}")
+            total_nfe_forward = info.get('nfe_forward', 0)
 
             # Debug: check forward pass on first iteration
             if iteration == 0 and config.verbose:
@@ -198,6 +224,13 @@ def one_stage_training(
         if original_fixed_params is not None:
             current_ode.fixed_params = original_fixed_params
 
+        forward_time = time.time() - forward_start
+        timing_stats['forward'] += forward_time
+
+        # Track NFE stats
+        nfe_stats['forward'] += total_nfe_forward
+        nfe_stats['total_calls'] += 1
+
         # Apply steady state filtering if requested
         if config.steady_state_fraction > 0:
             times, states, rewards = env.get_trajectory()
@@ -205,6 +238,7 @@ def one_stage_training(
             reward = rewards[start_idx:].sum()
 
         # Compute control statistics
+        control_stats_start = time.time()
         control_max, control_mean, control_rms = 0.0, 0.0, 0.0
         if hasattr(current_ode, 'controller'):
             times, states, _ = env.get_trajectory()
@@ -227,7 +261,11 @@ def one_stage_training(
             control_mean = torch.abs(controls).mean().item()
             control_rms = torch.sqrt((controls ** 2).mean()).item()
 
+        control_stats_time = time.time() - control_stats_start
+        timing_stats['control_stats'] += control_stats_time
+
         # Compute loss with regularization
+        reg_start = time.time()
         loss = -reward
         l1_reg = torch.tensor(0.0)
         l2_reg = torch.tensor(0.0)
@@ -242,7 +280,11 @@ def one_stage_training(
             l2_reg = (params ** 2).sum()
             loss = loss + config.l2_penalty * l2_reg
 
+        reg_time = time.time() - reg_start
+        timing_stats['regularization'] += reg_time
+
         # Evaluate on fixed ICs if enabled
+        eval_start = time.time()
         current_eval_reward = None
         if use_eval and (iteration % config.eval_interval == 0 or iteration == config.n_iterations - 1):
             # Run evaluation (with parameter perturbations if enabled in training)
@@ -276,8 +318,16 @@ def one_stage_training(
                 lowest_l1_norm = current_l1_norm
                 lowest_l1_params = params.clone().detach()
 
+        eval_time = time.time() - eval_start
+        timing_stats['evaluation'] += eval_time
+
         # Backpropagation
+        backward_start = time.time()
+        print(f"BEFORE BACKWARD PASS iteration {iteration}")
         loss.backward()
+        print(f"AFTER BACKWARD PASS iteration {iteration}")
+        backward_time = time.time() - backward_start
+        timing_stats['backward'] += backward_time
 
         # Debug: check gradients on first iteration
         if iteration == 0 and config.verbose:
@@ -308,7 +358,10 @@ def one_stage_training(
         if param_mask is not None and params.grad is not None:
             params.grad.data = params.grad.data * param_mask.float()
 
+        optimizer_start = time.time()
         optimizer.step()
+        optimizer_time = time.time() - optimizer_start
+        timing_stats['optimizer'] += optimizer_time
 
         # Apply mask to parameters if provided
         if param_mask is not None:
@@ -329,6 +382,7 @@ def one_stage_training(
         history['eval_reward'].append(current_eval_reward if current_eval_reward is not None else float('nan'))
 
         # Logging
+        logging_start = time.time()
         if config.verbose and (iteration % config.log_interval == 0 or iteration == config.n_iterations - 1):
             params_flat = params.flatten()
             params_str = "[" + ", ".join([f"{p.item():.3f}" for p in params_flat]) + "]"
@@ -359,6 +413,32 @@ def one_stage_training(
                 'phase': phase_name,
             }
             callback(iteration, metrics)
+
+        logging_time = time.time() - logging_start
+        timing_stats['logging'] += logging_time
+
+        # Track total iteration time
+        iter_time = time.time() - iter_start
+        timing_stats['total'] += iter_time
+
+        # Print timing report periodically
+        if config.verbose and (iteration % timing_report_interval == 0 or iteration == config.n_iterations - 1):
+            n_iters = iteration + 1
+            print(f"\n{'='*80}")
+            print(f"TIMING REPORT (averaged over {n_iters} iterations)")
+            print(f"{'='*80}")
+            total_avg = timing_stats['total'] / n_iters
+            print(f"{'Total per iteration:':<30} {total_avg*1000:>8.2f} ms  (100.0%)")
+            print(f"{'-'*80}")
+            for key in ['forward', 'backward', 'optimizer', 'control_stats', 'regularization', 'evaluation', 'logging']:
+                avg_time = timing_stats[key] / n_iters
+                pct = (avg_time / total_avg * 100) if total_avg > 0 else 0
+                print(f"  {key.capitalize():<28} {avg_time*1000:>8.2f} ms  ({pct:>5.1f}%)")
+            print(f"{'-'*80}")
+            # Print NFE stats
+            avg_nfe_forward = nfe_stats['forward'] / nfe_stats['total_calls'] if nfe_stats['total_calls'] > 0 else 0
+            print(f"{'NFE (forward pass avg):':<30} {avg_nfe_forward:>8.0f} calls")
+            print(f"{'='*80}\n")
 
     # Return best eval reward if evaluation was used, otherwise return best single-iteration reward
     final_best_reward = best_eval_reward if use_eval else best_reward

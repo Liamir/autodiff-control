@@ -19,8 +19,8 @@ from rpa_control.controllers import StaticController, ControlledODE
 
 
 # Stressor protocol parameters
-BASELINE_END = 50.0      # End of baseline period (days)
-STRESS_START = 50.0      # Start of chronic stress (days)
+BASELINE_END = 20.0      # End of baseline period (days)
+STRESS_START = 20.0      # Start of chronic stress (days)
 TREATMENT_START = 150.0  # Start of treatment (days)
 BASELINE_STRESS = 1.0    # Normal stressor level
 CHRONIC_STRESS = 2.0     # Elevated stressor level
@@ -29,8 +29,8 @@ CHRONIC_STRESS = 2.0     # Elevated stressor level
 def stressor(t):
     """Time-varying stressor input.
 
-    u=1 for t < 50 (baseline)
-    u=2 for t >= 50 (chronic stress, continues during treatment)
+    u=1 for t < 20 (baseline)
+    u=2 for t >= 20 (chronic stress, continues during treatment)
     """
     if t < STRESS_START:
         return BASELINE_STRESS
