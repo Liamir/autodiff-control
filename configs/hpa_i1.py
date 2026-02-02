@@ -215,7 +215,7 @@ Control objective: restore Cortisol to 1.0 using only I1""",
 
     # Default training settings
     'defaults': {
-        'time_horizon': 50.0,  # Reduced for testing (baseline only)
+        'time_horizon': 200.0,  # Reduced for testing (baseline only)
         'n_reward_steps': 100,
         'steady_state_fraction': 0.2,  # Track last 10 days (second half of treatment, days 40-50)
         'learning_rate': 0.1,

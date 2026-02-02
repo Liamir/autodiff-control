@@ -29,6 +29,7 @@ class ControlledODE(ODE):
         base_ode: ODE,
         controller: Union[StaticController, DynamicController],
         control_indices: List[int],
+        control_bounds: tuple = None,
     ):
         """Initialize controlled ODE.
 
@@ -38,10 +39,13 @@ class ControlledODE(ODE):
             control_indices: Indices of state variables that receive control input.
                            Must have length equal to controller.n_control_vars.
                            Example: [0, 1] means u[0] is added to dX[0]/dt, u[1] to dX[1]/dt
+            control_bounds: Optional (min, max) bounds for control clipping.
+                          If provided, control will be clipped to [min, max].
         """
         self.base_ode = base_ode
         self.controller = controller
         self.control_indices = control_indices
+        self.control_bounds = control_bounds
 
         # Validate control indices
         assert len(control_indices) == controller.n_control_vars, \
@@ -122,6 +126,10 @@ class ControlledODE(ODE):
 
             control = torch.matmul(actuating_params, output_basis)
 
+            # Clip control if bounds are specified
+            if self.control_bounds is not None:
+                control = torch.clamp(control, min=self.control_bounds[0], max=self.control_bounds[1])
+
             # Compute base ODE dynamics with control
             base_derivative = self.base_ode(t, base_state, None, fixed_params, control=control)
 
@@ -152,6 +160,10 @@ class ControlledODE(ODE):
                 basis = basis / self.controller.basis_scales_per_basis
 
             control = torch.matmul(differentiable_params, basis)
+
+            # Clip control if bounds are specified
+            if self.control_bounds is not None:
+                control = torch.clamp(control, min=self.control_bounds[0], max=self.control_bounds[1])
 
             # Compute base ODE dynamics with control
             base_derivative = self.base_ode(t, base_state, None, fixed_params, control=control)

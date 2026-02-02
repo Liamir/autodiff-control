@@ -1,27 +1,26 @@
 """Configuration for ABControlled environment with learned controller.
 
-The ABControlled ODE has control inputs that modulate the alpha parameters:
-    dA/dt = alpha1*u[0] + alpha2*u[1]*A + alpha3*u[2]*B
-    dB/dt = beta1*A - beta2*B
+The ABControlled ODE has simplified equations with single control input:
+    dA/dt = u*alpha*(1-B)
+    dB/dt = A - B
 
 We learn a polynomial controller: u = theta * Phi(A, B)
 """
 import torch
-from rpasim.ode.ab import ABControlled
+from rpasim.ode.rpa.ab import ABControlled
 from rpa_control.controllers import StaticController, ControlledODE
 
 
 def reward_fn(state, time=None):
-    """Reward function: stabilize at target (B=1.0).
+    """Reward function: stabilize at target (B=0.0).
     """
-    target_b = 1.0
-    return -(state[1] - target_b) ** 2
+    # target is B's norm as large as possible
+    B_norm = torch.abs(state[1])
+    return -1.0 + B_norm  # larger is better
 
 
-# ODE parameters: [alpha1, alpha2, alpha3, beta1, beta2]
-# With u=[1,1,1], steady state: A = -alpha1/(alpha2 + 4*alpha3), B = 4*A
-FIXED_PARAMS = torch.tensor([1.0, -0.5, -0.25, 4.0, 1.0])
-# Steady state: A = -1/(-0.5 + 4*(-0.25)) = -1/(-1.5) = 0.667, B = 2.667
+# ODE parameter: alpha
+FIXED_PARAMS = torch.tensor([50.0])
 
 
 def create_base_ode():
@@ -38,18 +37,18 @@ def create_ode(controller_order=2, include_constant=True):
     from rpa_control.controllers.basis import get_basis_size
     n_basis = get_basis_size(n_vars=2, order=controller_order, include_constant=include_constant)
 
-    # Initialize controller to output u=[1,1,1] by default
+    # Initialize controller to output u=1.0 by default
     # The constant term "1" is the first basis function (index 0)
-    # Setting params[:, 0] = 1.0 gives u = [1, 1, 1] + other_terms*0
-    initial_params = torch.zeros(3, n_basis)
+    # Setting params[0, 0] = 1.0 gives u = 1.0 + other_terms*0
+    initial_params = torch.zeros(1, n_basis)
     if include_constant:
-        initial_params[:, 0] = 1.0  # Constant term for all 3 control outputs
+        initial_params[0, 0] = 1.0  # Constant term for single control output
 
     # Create static controller
-    # 2 state vars (A, B), 3 control outputs (u0, u1, u2)
+    # 2 state vars (A, B), 1 control output (u)
     controller = StaticController(
         n_state_vars=2,
-        n_control_vars=3,
+        n_control_vars=1,
         order=controller_order,
         include_constant=include_constant,
         initial_params=initial_params,
@@ -57,11 +56,11 @@ def create_ode(controller_order=2, include_constant=True):
 
     # Create controlled ODE
     # control_indices is required but ABControlled handles control internally
-    # (it's multiplicative on the alpha terms, not additive on derivatives)
     controlled_ode = ControlledODE(
         base_ode=ab_ode,
         controller=controller,
-        control_indices=[0, 1, 2]  # Placeholder - ABControlled uses control internally
+        control_indices=[0],  # Placeholder - ABControlled uses control internally
+        control_bounds=(0.0, 1.0)  # Clip control between 0 and 1
     )
 
     return controlled_ode
@@ -92,31 +91,30 @@ ENV_CONFIG = {
     ],
 
     # Perturbation settings (for ODE parameters)
-    'perturb_param_indices': [0, 1, 2, 3, 4],  # Perturb all 5 params
+    'perturb_param_indices': [0],  # Perturb alpha parameter
 
     # Display settings
     'param_names': None,  # Controller parameters (will be basis function names)
     'state_var_names': ['A', 'B'],
-    'control_names': ['u0', 'u1', 'u2'],
-    'target_vars': {1: 1.0},  # Target value: B=1.0
+    'control_names': ['u'],
+    # 'target_vars': {1: -100.0},  # Target value: B=0.0
 
     # Description for display
-    'description': """ABControlled (Integral Feedback) with Static Controller
+    'description': """ABControlled (Simplified) with Static Controller
 
 System:
-  dA/dt = alpha1*u[0] + alpha2*u[1]*A + alpha3*u[2]*B
-  dB/dt = beta1*A - beta2*B
+  dA/dt = u*alpha*(1-B)
+  dB/dt = A - B
 
-Controller: [u0, u1, u2] = theta * Phi(A, B)
+Controller: u = theta * Phi(A, B)
 
 Control objective: stabilize at
-  B = 1.0
+  B = 0.0
 
 Parameters (fixed):
-  alpha1=1.0, alpha2=-0.5, alpha3=-0.25
-  beta1=4.0, beta2=1.0
+  alpha = 1.0
 
-Note: With u=[1,1,1], the natural steady state is (A=0.667, B=2.667).""",
+Note: With u=1, system is unstable. Need active control to stabilize at B=0.""",
 
     # Default training settings
     'defaults': {
@@ -125,11 +123,12 @@ Note: With u=[1,1,1], the natural steady state is (A=0.667, B=2.667).""",
         'steady_state_fraction': 0.5,
         'learning_rate': 0.1,
         'n_iterations': 500,
-        'log_interval': 50,
+        'log_interval': 10,
         'eval_interval': 50,
         'controller_order': 2,
         'scale_aware_regularization': True,
         'state_limits': (-20.0, 20.0),
+        'control_bounds': (0.0, 1.0),  # Clip control signal between 0 and 1
         'seed': 42,
         'use_single_ic': True,  # Start with single IC for stability
     },
@@ -145,6 +144,6 @@ Note: With u=[1,1,1], the natural steady state is (A=0.667, B=2.667).""",
         'u_max': 5.0,              # Maximum control input
         'cost_type': 'quadratic',
         'ftol': 1e-3,
-        'n_controls': 3,           # 3 control inputs
+        'n_controls': 1,           # Single control input
     }
 }

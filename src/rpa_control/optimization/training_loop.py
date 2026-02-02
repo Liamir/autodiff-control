@@ -206,9 +206,7 @@ def one_stage_training(
 
         else:
             # Standard full BPTT: single simulation through full time horizon
-            print(f"BEFORE FULL SIMULATION iteration {iteration}")
             obs, reward, terminated, truncated, info = env.step((current_ode, time_horizon))
-            print(f"AFTER FULL SIMULATION iteration {iteration}")
             total_nfe_forward = info.get('nfe_forward', 0)
 
             # Debug: check forward pass on first iteration
@@ -323,9 +321,7 @@ def one_stage_training(
 
         # Backpropagation
         backward_start = time.time()
-        print(f"BEFORE BACKWARD PASS iteration {iteration}")
         loss.backward()
-        print(f"AFTER BACKWARD PASS iteration {iteration}")
         backward_time = time.time() - backward_start
         timing_stats['backward'] += backward_time
 
