@@ -20,6 +20,8 @@ setup(
         "torchdiffeq",
         "gymnasium",
         "stable-baselines3",
+        "wandb",
+        "optuna",
         "pytest",
     ],
 )
