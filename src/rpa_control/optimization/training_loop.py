@@ -417,8 +417,8 @@ def one_stage_training(
         iter_time = time.time() - iter_start
         timing_stats['total'] += iter_time
 
-        # Print timing report periodically
-        if config.verbose and (iteration % timing_report_interval == 0 or iteration == config.n_iterations - 1):
+        # Print timing report at the end of training
+        if config.verbose and iteration == config.n_iterations - 1:
             n_iters = iteration + 1
             print(f"\n{'='*80}")
             print(f"TIMING REPORT (averaged over {n_iters} iterations)")

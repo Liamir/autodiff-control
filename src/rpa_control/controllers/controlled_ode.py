@@ -4,6 +4,7 @@ from rpasim.ode import ODE
 from typing import Union, List
 from .static import StaticController
 from .dynamic import DynamicController
+from .mlp import MLPController
 from .basis import polynomial_basis
 
 
@@ -27,7 +28,7 @@ class ControlledODE(ODE):
     def __init__(
         self,
         base_ode: ODE,
-        controller: Union[StaticController, DynamicController],
+        controller: Union[StaticController, DynamicController, MLPController],
         control_indices: List[int],
         control_bounds: tuple = None,
     ):
@@ -35,7 +36,7 @@ class ControlledODE(ODE):
 
         Args:
             base_ode: Base ODE system
-            controller: Static or dynamic controller
+            controller: Static, dynamic, or MLP controller
             control_indices: Indices of state variables that receive control input.
                            Must have length equal to controller.n_control_vars.
                            Example: [0, 1] means u[0] is added to dX[0]/dt, u[1] to dX[1]/dt
@@ -60,8 +61,9 @@ class ControlledODE(ODE):
         else:
             raise ValueError("Cannot infer state dimension from base ODE")
 
-        # Determine if dynamic controller
+        # Determine controller type
         self.is_dynamic = isinstance(controller, DynamicController)
+        self.is_mlp = isinstance(controller, MLPController)
 
         if self.is_dynamic:
             # State dimension is base + controller states
@@ -147,19 +149,24 @@ class ControlledODE(ODE):
             derivative = torch.cat([base_derivative, controller_derivative])
 
         else:
-            # Static controller
+            # Static or MLP controller
             base_state = state
 
-            # differentiable_params is already (n_control_vars, n_basis) shape - no reshape needed
+            if self.is_mlp:
+                # MLP controller: compute control using neural network
+                control = self.controller(base_state)
+            else:
+                # Static polynomial controller
+                # differentiable_params is already (n_control_vars, n_basis) shape - no reshape needed
 
-            # Compute control (observed): u = θ_obs · Φ(X)
-            basis = polynomial_basis(base_state, self.controller.order, self.controller.include_constant)
+                # Compute control (observed): u = θ_obs · Φ(X)
+                basis = polynomial_basis(base_state, self.controller.order, self.controller.include_constant)
 
-            # Normalize basis if scales are available (Approach 1)
-            if self.controller.basis_scales_per_basis is not None:
-                basis = basis / self.controller.basis_scales_per_basis
+                # Normalize basis if scales are available (Approach 1)
+                if self.controller.basis_scales_per_basis is not None:
+                    basis = basis / self.controller.basis_scales_per_basis
 
-            control = torch.matmul(differentiable_params, basis)
+                control = torch.matmul(differentiable_params, basis)
 
             # Clip control if bounds are specified
             if self.control_bounds is not None:

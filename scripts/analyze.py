@@ -263,19 +263,51 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
             ax.spines['right'].set_visible(False)
             ax.spines['top'].set_visible(False)
 
-        # Plot control
+        # Plot control (raw and clamped)
         ax = axes[-1]
         control_times = times[:-1]  # Control is one step shorter
+
+        # Get control bounds from config if available
+        control_bounds = config.get('control_bounds', None)
+        if control_bounds is None and config_name:
+            try:
+                env_config = load_config_module(config_name)
+                control_bounds = env_config.get('defaults', {}).get('control_bounds', None)
+            except:
+                pass
+
         if n_controls == 1:
-            ax.plot(control_times, controls, 'g-', linewidth=2, label=control_names[0])
+            # Plot raw controller output
+            ax.plot(control_times, controls, 'g--', linewidth=2, alpha=0.6,
+                   label=f'{control_names[0]} (raw)')
+
+            # Plot clamped control if bounds are available
+            if control_bounds is not None:
+                controls_clamped = np.clip(controls, control_bounds[0], control_bounds[1])
+                ax.plot(control_times, controls_clamped, 'g-', linewidth=2,
+                       label=f'{control_names[0]} (clamped)')
+
+                # Add horizontal lines for bounds
+                ax.axhline(control_bounds[0], color='r', linestyle=':', alpha=0.5,
+                          label=f'lower bound ({control_bounds[0]})')
+                ax.axhline(control_bounds[1], color='r', linestyle=':', alpha=0.5,
+                          label=f'upper bound ({control_bounds[1]})')
         else:
             for i in range(n_controls):
-                ax.plot(control_times, controls[:, i], linewidth=2,
-                       label=control_names[i] if i < len(control_names) else f'u{i}')
+                # Plot raw controller output
+                ax.plot(control_times, controls[:, i], linewidth=2, alpha=0.6, linestyle='--',
+                       label=f'{control_names[i] if i < len(control_names) else f"u{i}"} (raw)')
+
+                # Plot clamped control if bounds are available
+                if control_bounds is not None:
+                    controls_clamped = np.clip(controls[:, i], control_bounds[0], control_bounds[1])
+                    ax.plot(control_times, controls_clamped, linewidth=2,
+                           label=f'{control_names[i] if i < len(control_names) else f"u{i}"} (clamped)')
+
         ax.axhline(0.0, color='k', linestyle='--', alpha=0.3)
         ax.set_xlabel('Time')
         ax.set_ylabel('Control')
-        ax.set_title('Trained Controller Output')
+        ax.set_title('Controller Output (Raw MLP output vs Clamped)')
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.spines['right'].set_visible(False)

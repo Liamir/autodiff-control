@@ -66,6 +66,8 @@ class ExperimentLogger:
                 serializable_config[key] = str(value)
             elif torch.is_tensor(value):
                 serializable_config[key] = value.tolist()
+            elif isinstance(value, tuple):
+                serializable_config[key] = list(value)  # Convert tuple to list for JSON
             else:
                 serializable_config[key] = str(value)
 

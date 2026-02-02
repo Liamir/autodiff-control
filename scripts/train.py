@@ -361,6 +361,9 @@ def train(
     if has_controller:
         config_dict['controller_order'] = controller_order
         config_dict['include_constant'] = include_constant
+        # Add control bounds if available
+        if hasattr(ode, 'control_bounds') and ode.control_bounds is not None:
+            config_dict['control_bounds'] = ode.control_bounds
 
     # Add display parameters (for analysis script)
     config_dict['target_vars'] = env_config.get('target_vars', {})
