@@ -1,0 +1,10 @@
+{
+  "one_minus_gamma": 0.00010378640374934082,
+  "batch_size_pow": 4,
+  "learning_rate": 0.0002253151238105246,
+  "train_freq": 5,
+  "tau": 0.0032988422939574883,
+  "noise_type": "ornstein-uhlenbeck",
+  "noise_std": 0.3500012940013433,
+  "net_arch": "big"
+}

@@ -21,7 +21,9 @@ setup(
         "gymnasium",
         "stable-baselines3",
         "wandb",
+        "tensorboard",
         "optuna",
+        "rpasim @ git+ssh://git@github.com/JonathanSomer/rpa-simulators.git",
         "pytest",
     ],
 )

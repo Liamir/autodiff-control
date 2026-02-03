@@ -1,6 +1,9 @@
 .venv
 venv/
 plots/
+models/
+runs/
+wandb/
 
 __pycache__/
 *.pyc
