@@ -1,9 +1,11 @@
 """Core training loop for one stage of optimization."""
 import torch
 import time
+from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List, Tuple
 from .config import TrainingConfig
 from .evaluation import evaluate_controller
+from .trajectory_plotting import plot_training_trajectory
 
 
 def one_stage_training(
@@ -17,6 +19,8 @@ def one_stage_training(
     phase_name: str = "train",
     callback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
     track_lowest_l1: bool = False,
+    output_dir: Optional[Path] = None,
+    full_config: Optional[dict] = None,
 ) -> Tuple[Dict[str, List[float]], float, torch.Tensor, Optional[torch.Tensor]]:
     """Execute a single training stage of n_iterations.
 
@@ -31,6 +35,8 @@ def one_stage_training(
         phase_name: Name for logging (e.g., "train", "stage1", "stage2")
         callback: Optional callback function
         track_lowest_l1: If True, also track parameters with lowest L1 norm
+        output_dir: Directory to save trajectory plots (optional)
+        full_config: Full configuration dict for trajectory plotting (optional)
 
     Returns:
         history: Dictionary of training metrics
@@ -62,6 +68,13 @@ def one_stage_training(
     use_eval = (config.eval_interval > 0 and
                 config.eval_initial_states is not None and
                 len(config.eval_initial_states) > 0)
+
+    # Trajectory plotting tracking
+    evals_since_improvement = 0
+    enable_plotting = (config.plot_trajectories and
+                      output_dir is not None and
+                      full_config is not None and
+                      use_eval)
 
     # Timing accumulators
     timing_stats = {
@@ -296,6 +309,42 @@ def one_stage_training(
             if current_eval_reward > best_eval_reward:
                 best_eval_reward = current_eval_reward
                 best_params = params.clone().detach()
+                evals_since_improvement = 0
+
+                # Plot trajectory when eval beats previous best
+                if enable_plotting and config.verbose:
+                    try:
+                        filename = plot_training_trajectory(
+                            ode=ode,
+                            env=env,
+                            params=params,
+                            config=full_config,
+                            output_dir=output_dir,
+                            iteration=iteration,
+                            reason="best",
+                        )
+                        print(f"  Trajectory plot saved: {filename}")
+                    except Exception as e:
+                        print(f"  Warning: Failed to plot trajectory: {e}")
+            else:
+                evals_since_improvement += 1
+
+                # Plot trajectory when eval hasn't improved for plot_trajectory_interval evaluations
+                if enable_plotting and config.plot_trajectory_interval > 0 and evals_since_improvement >= config.plot_trajectory_interval and config.verbose:
+                    try:
+                        filename = plot_training_trajectory(
+                            ode=ode,
+                            env=env,
+                            params=params,
+                            config=full_config,
+                            output_dir=output_dir,
+                            iteration=iteration,
+                            reason="periodic",
+                        )
+                        print(f"  Trajectory plot saved (periodic): {filename}")
+                        evals_since_improvement = 0  # Reset counter after plotting
+                    except Exception as e:
+                        print(f"  Warning: Failed to plot trajectory: {e}")
 
         # Update best parameters BEFORE optimizer step (based on single-iteration reward if no eval)
         # (reward was computed with current params, so we need to save these params, not the post-step params)
@@ -435,6 +484,22 @@ def one_stage_training(
             avg_nfe_forward = nfe_stats['forward'] / nfe_stats['total_calls'] if nfe_stats['total_calls'] > 0 else 0
             print(f"{'NFE (forward pass avg):':<30} {avg_nfe_forward:>8.0f} calls")
             print(f"{'='*80}\n")
+
+    # Plot final trajectory with best controller
+    if enable_plotting and config.verbose:
+        try:
+            filename = plot_training_trajectory(
+                ode=ode,
+                env=env,
+                params=best_params,
+                config=full_config,
+                output_dir=output_dir,
+                iteration=config.n_iterations - 1,
+                reason="final",
+            )
+            print(f"\nFinal trajectory plot saved: {filename}")
+        except Exception as e:
+            print(f"\nWarning: Failed to plot final trajectory: {e}")
 
     # Return best eval reward if evaluation was used, otherwise return best single-iteration reward
     final_best_reward = best_eval_reward if use_eval else best_reward

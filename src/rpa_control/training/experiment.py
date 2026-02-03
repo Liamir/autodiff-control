@@ -121,6 +121,8 @@ def create_ode_from_config(
     env_config: dict,
     controller_order: int = None,
     include_constant: bool = None,
+    n_hidden: int = None,
+    activation: str = None,
     model_params: dict = None,
 ):
     """Create ODE instance from environment configuration.
@@ -129,6 +131,8 @@ def create_ode_from_config(
         env_config: Environment configuration dictionary
         controller_order: Controller polynomial order (for control problems)
         include_constant: Include constant in controller (for control problems)
+        n_hidden: Number of hidden neurons for MLP controller (for MLP-based control)
+        activation: Activation function for MLP controller (for MLP-based control)
         model_params: Optional dict of model parameters to override defaults
 
     Returns:
@@ -144,8 +148,17 @@ def create_ode_from_config(
             controller_order = defaults.get('controller_order', 2)
         if include_constant is None:
             include_constant = defaults.get('include_constant', True)
+        if n_hidden is None:
+            n_hidden = defaults.get('n_hidden', 8)
+        if activation is None:
+            activation = defaults.get('activation', 'tanh')
 
-        ode = create_ode(controller_order=controller_order, include_constant=include_constant)
+        ode = create_ode(
+            controller_order=controller_order,
+            include_constant=include_constant,
+            n_hidden=n_hidden,
+            activation=activation,
+        )
     else:
         # Circuit design ODE
         ode = create_ode()
@@ -248,6 +261,8 @@ def create_training_config(
     threshold_value_stage3: float = 1e-3,
     use_tbptt: bool = False,
     tbptt_truncation_steps: int = 5,
+    plot_trajectories: bool = False,
+    plot_trajectory_interval: int = 5,
 ):
     """Create training configuration.
 
@@ -272,6 +287,8 @@ def create_training_config(
         threshold_value_stage3: Stage 3 threshold
         use_tbptt: Enable truncated backpropagation through time
         tbptt_truncation_steps: Number of steps to backprop through
+        plot_trajectories: Enable trajectory plotting during training
+        plot_trajectory_interval: Plot when eval hasn't improved for N evaluations
 
     Returns:
         TrainingConfig instance
@@ -297,4 +314,6 @@ def create_training_config(
         threshold_value_stage3=threshold_value_stage3,
         use_tbptt=use_tbptt,
         tbptt_truncation_steps=tbptt_truncation_steps,
+        plot_trajectories=plot_trajectories,
+        plot_trajectory_interval=plot_trajectory_interval,
     )

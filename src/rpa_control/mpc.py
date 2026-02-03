@@ -5,6 +5,10 @@ Uses scipy.optimize with RK4 integration based on the SINDY-MPC paper approach.
 Supports generic control interface: ODEs that accept control via the `control` parameter
 in their forward() method. This works with both additive and nonlinear control coupling.
 
+Supports two cost function modes:
+1. Reference tracking (default): Minimize tracking error with Q, Ru, R_deltau weights
+2. Custom stage cost: User-defined cost function stage_cost_fn(x_next, u, x_curr, k)
+
 For legacy additive control (PopulationDynamics), see mpc_additive.py.
 """
 import torch
@@ -32,6 +36,7 @@ class MPCConfig:
         disp: bool = False,
         cost_type: str = 'quadratic',
         tracked_state_indices: Optional[list[int]] = None,
+        stage_cost_fn: Optional[callable] = None,
     ):
         """Initialize MPC configuration.
 
@@ -49,6 +54,9 @@ class MPCConfig:
             disp: Display optimization progress
             cost_type: Type of cost function ('quadratic' or 'l1')
             tracked_state_indices: Indices of states to track (None = track all states)
+            stage_cost_fn: Optional custom stage cost function with signature:
+                           stage_cost_fn(x_next, u, x_curr=None, k=None) -> float
+                           If None, uses reference tracking cost (Q, Ru, R_deltau)
         """
         self.prediction_horizon = prediction_horizon
         self.dt = dt
@@ -63,6 +71,7 @@ class MPCConfig:
         self.disp = disp
         self.cost_type = cost_type
         self.tracked_state_indices = tracked_state_indices
+        self.stage_cost_fn = stage_cost_fn
 
 
 class MPCController:
@@ -70,13 +79,32 @@ class MPCController:
 
     Uses generic control interface: passes control to ODE via `control` parameter.
     Works with both additive and nonlinear control coupling.
+
+    Example with custom cost function:
+    >>> def my_stage_cost(x_next, u, x_curr=None, k=None):
+    ...     '''Custom cost: maximize |B| while penalizing large control'''
+    ...     B = x_next[1]  # Second state variable
+    ...     reward = torch.abs(B)  # Maximize |B|
+    ...     cost = -reward + 0.1 * (u**2)  # Minimize cost = maximize reward
+    ...     return cost
+    >>>
+    >>> config = MPCConfig(
+    ...     prediction_horizon=20,
+    ...     dt=0.1,
+    ...     stage_cost_fn=my_stage_cost,  # Use custom cost
+    ...     Ru=0.0,  # Not used (already in stage_cost_fn)
+    ...     R_deltau=0.1,  # Control smoothness (always applied)
+    ...     u_min=0.2,
+    ...     u_max=1.0,
+    ... )
+    >>> mpc = MPCController(ode, config, reference_state=None)  # No reference needed
     """
 
     def __init__(
         self,
         ode: torch.nn.Module,
         config: MPCConfig,
-        reference_state: torch.Tensor,
+        reference_state: torch.Tensor = None,
         n_controls: int = 1,
     ):
         """Initialize MPC controller.
@@ -84,14 +112,26 @@ class MPCController:
         Args:
             ode: ODE system that accepts `control` parameter in forward()
             config: MPC configuration
-            reference_state: Target state to track
+            reference_state: Target state to track (required if not using custom stage_cost_fn)
             n_controls: Number of control inputs (default: 1)
         """
         self.ode = ode
         self.config = config
-        self.reference_state = reference_state.detach().numpy()
-        self.n_states = len(reference_state)
         self.n_controls = n_controls
+
+        # Custom stage cost function (if provided)
+        self.stage_cost_fn = config.stage_cost_fn
+
+        # Reference state (required only for default reference tracking)
+        if self.stage_cost_fn is None and reference_state is None:
+            raise ValueError("reference_state is required when not using custom stage_cost_fn")
+
+        if reference_state is not None:
+            self.reference_state = reference_state.detach().numpy()
+            self.n_states = len(reference_state)
+        else:
+            self.reference_state = None
+            # Will infer n_states from first control step
 
         # Verify ODE supports control parameter
         forward_sig = inspect.signature(ode.forward)
@@ -101,17 +141,25 @@ class MPCController:
                 "For additive control ODEs, use mpc_additive.py instead."
             )
 
-        # Convert Q to weights
-        Q_weights = config.Q.numpy() if isinstance(config.Q, torch.Tensor) else np.array(config.Q)
-        if config.cost_type == 'quadratic':
-            self.Q = np.diag(Q_weights)  # Diagonal matrix for quadratic cost
-        else:  # L1 cost
-            self.Q = Q_weights  # Vector of weights for L1 cost
+        # Convert Q to weights (only needed if using default cost)
+        if self.stage_cost_fn is None:
+            Q_weights = config.Q.numpy() if isinstance(config.Q, torch.Tensor) else np.array(config.Q)
+            if config.cost_type == 'quadratic':
+                self.Q = np.diag(Q_weights)  # Diagonal matrix for quadratic cost
+            else:  # L1 cost
+                self.Q = Q_weights  # Vector of weights for L1 cost
 
-        self.Ru = config.Ru
-        self.R_deltau = config.R_deltau
-        self.cost_type = config.cost_type
-        self.tracked_state_indices = config.tracked_state_indices
+            self.Ru = config.Ru
+            self.R_deltau = config.R_deltau
+            self.cost_type = config.cost_type
+            self.tracked_state_indices = config.tracked_state_indices
+        else:
+            # Not needed for custom cost
+            self.Q = None
+            self.Ru = config.Ru  # Still might be used for control regularization
+            self.R_deltau = config.R_deltau  # Still might be used for smoothness
+            self.cost_type = None
+            self.tracked_state_indices = None
 
         # Previous control for warm-starting
         self.u_prev = 0.0
@@ -189,38 +237,66 @@ class MPCController:
             # Predict next state
             x_next = self._rk4_step(x_curr, u_k, dt)
 
-            # State tracking cost
-            error = x_next - self.reference_state
+            # ===== Custom stage cost function =====
+            if self.stage_cost_fn is not None:
+                # Use custom cost function
+                # Convert to torch tensors for the cost function
+                x_next_torch = torch.tensor(x_next, dtype=torch.float32)
+                x_curr_torch = torch.tensor(x_curr, dtype=torch.float32)
+                u_k_torch = torch.tensor(u_k, dtype=torch.float32)
 
-            if self.cost_type == 'l1':
-                # L1 cost: sum of absolute values
-                if self.tracked_state_indices is not None:
-                    # Only track specific states
-                    tracked_error = error[self.tracked_state_indices]
-                    weighted_error = self.Q * np.abs(tracked_error)
-                    state_cost = np.sum(weighted_error)
-                else:
-                    # Track all states
-                    weighted_error = self.Q * np.abs(error)
-                    state_cost = np.sum(weighted_error)
-            else:  # quadratic cost
-                # Quadratic cost: error^T @ Q @ error
-                state_cost = error.T @ self.Q @ error
+                # Call custom stage cost
+                # Try to call with different signatures for flexibility
+                try:
+                    stage_cost = self.stage_cost_fn(x_next_torch, u_k_torch, x_curr=x_curr_torch, k=k)
+                except TypeError:
+                    # Try simpler signature
+                    try:
+                        stage_cost = self.stage_cost_fn(x_next_torch, u_k_torch)
+                    except TypeError:
+                        # Try state-only signature (for control-free costs)
+                        stage_cost = self.stage_cost_fn(x_next_torch)
 
-            # Control magnitude cost
-            if self.cost_type == 'l1':
-                control_magnitude_cost = self.Ru * np.abs(u_k)  # |u|
+                # Convert to scalar
+                if torch.is_tensor(stage_cost):
+                    stage_cost = stage_cost.item()
+
+            # ===== Default reference tracking cost =====
             else:
-                control_magnitude_cost = self.Ru * (u_k**2)  # u²
+                # State tracking cost
+                error = x_next - self.reference_state
 
-            # Control rate-of-change cost
+                if self.cost_type == 'l1':
+                    # L1 cost: sum of absolute values
+                    if self.tracked_state_indices is not None:
+                        # Only track specific states
+                        tracked_error = error[self.tracked_state_indices]
+                        weighted_error = self.Q * np.abs(tracked_error)
+                        state_cost = np.sum(weighted_error)
+                    else:
+                        # Track all states
+                        weighted_error = self.Q * np.abs(error)
+                        state_cost = np.sum(weighted_error)
+                else:  # quadratic cost
+                    # Quadratic cost: error^T @ Q @ error
+                    state_cost = error.T @ self.Q @ error
+
+                # Control magnitude cost
+                if self.cost_type == 'l1':
+                    control_magnitude_cost = self.Ru * np.abs(u_k)  # |u|
+                else:
+                    control_magnitude_cost = self.Ru * (u_k**2)  # u²
+
+                stage_cost = state_cost + control_magnitude_cost
+
+            # Control rate-of-change cost (always applied for smoothness)
             if k == 0:
                 du = u_k - self.u_prev
             else:
                 du = u_k - u_seq[k-1]
             control_change_cost = self.R_deltau * (du**2)
 
-            cost += state_cost + control_magnitude_cost + control_change_cost
+            cost += stage_cost + control_change_cost
 
             x_curr = x_next
 

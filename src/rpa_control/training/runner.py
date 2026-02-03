@@ -13,6 +13,8 @@ def run_training(
     perturb_fold_change=2.0,
     n_param_samples_eval=10,
     eval_interval=0,
+    logger=None,
+    full_config=None,
 ):
     """Execute training phase.
 
@@ -25,6 +27,8 @@ def run_training(
         perturb_fold_change: Fold change for parameter perturbations
         n_param_samples_eval: Number of parameter samples per IC during evaluation
         eval_interval: Evaluation interval
+        logger: ExperimentLogger for saving plots
+        full_config: Full configuration dict for trajectory plotting
 
     Returns:
         dict: Training history
@@ -45,11 +49,16 @@ def run_training(
         print(f"Evaluation interval: {eval_interval}")
     print()
 
+    # Get output directory from logger
+    output_dir = logger.get_experiment_path() if logger is not None else None
+
     # Train
     history = train_ode_parameters(
         env=env,
         ode=ode,
         config=config,
+        output_dir=output_dir,
+        full_config=full_config,
     )
 
     print()

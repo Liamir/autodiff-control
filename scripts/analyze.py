@@ -427,22 +427,38 @@ def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True):
     times = np.array(mpc_data['times'])
     states = np.array(mpc_data['states'])
     controls = np.array(mpc_data['controls'])
-    reference_state = np.array(mpc_data['reference_state'])
+    reference_state = mpc_data['reference_state']
+
+    # Check if using custom cost (no reference state)
+    use_custom_cost = reference_state is None or config.get('use_custom_cost', False)
+
+    if not use_custom_cost:
+        reference_state = np.array(reference_state)
 
     # Compute metrics
     final_state = states[-1]
-    tracking_errors = np.linalg.norm(states - reference_state, axis=1)
-    final_error = tracking_errors[-1]
-    mean_error = tracking_errors.mean()
-    max_error = tracking_errors.max()
+
+    if not use_custom_cost:
+        tracking_errors = np.linalg.norm(states - reference_state, axis=1)
+        final_error = tracking_errors[-1]
+        mean_error = tracking_errors.mean()
+        max_error = tracking_errors.max()
+    else:
+        tracking_errors = None
+        final_error = None
+        mean_error = None
+        max_error = None
 
     # Display results
     print("MPC Results:")
     print(f"  Final state: {final_state.tolist()}")
-    print(f"  Reference state: {reference_state.tolist()}")
-    print(f"  Final tracking error: {final_error:.6f}")
-    print(f"  Mean tracking error: {mean_error:.6f}")
-    print(f"  Max tracking error: {max_error:.6f}")
+    if not use_custom_cost:
+        print(f"  Reference state: {reference_state.tolist()}")
+        print(f"  Final tracking error: {final_error:.6f}")
+        print(f"  Mean tracking error: {mean_error:.6f}")
+        print(f"  Max tracking error: {max_error:.6f}")
+    else:
+        print(f"  (Using custom cost function - no reference tracking)")
     print()
 
     print(f"Control statistics:")
@@ -482,10 +498,12 @@ def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True):
         for i in range(n_states):
             ax = axes[i]
             ax.plot(times, states[:, i], 'b-', linewidth=2, label=f'{state_var_names[i]} (actual)')
-            ax.axhline(reference_state[i], color='r', linestyle='--', alpha=0.5, label='target')
+            if not use_custom_cost:
+                ax.axhline(reference_state[i], color='r', linestyle='--', alpha=0.5, label='target')
             ax.set_xlabel('Time')
             ax.set_ylabel(state_var_names[i])
-            ax.set_title(f'{state_var_names[i]} Evolution with MPC')
+            title_suffix = ' with MPC' if not use_custom_cost else ' with MPC (custom cost)'
+            ax.set_title(f'{state_var_names[i]} Evolution{title_suffix}')
             ax.legend()
             ax.grid(True, alpha=0.3)
             ax.spines['right'].set_visible(False)

@@ -13,6 +13,8 @@ def train_ode_parameters(
     optimizer: Optional[torch.optim.Optimizer] = None,
     config: Optional[TrainingConfig] = None,
     callback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+    output_dir: Optional[Any] = None,
+    full_config: Optional[dict] = None,
 ) -> Dict[str, List[float]]:
     """
     Train ODE parameters using gradient descent through differentiable simulation.
@@ -30,6 +32,8 @@ def train_ode_parameters(
         optimizer: PyTorch optimizer (default: Adam with config.learning_rate)
         config: Training configuration
         callback: Optional callback function called after each iteration with (iteration, metrics)
+        output_dir: Directory to save trajectory plots (optional)
+        full_config: Full configuration dict for trajectory plotting (optional)
 
     Returns:
         Dictionary containing training history (losses, rewards, etc.)
@@ -96,7 +100,9 @@ def train_ode_parameters(
             basis_scales=basis_scales,
             param_mask=None,
             phase_name="stage1",
-            callback=callback
+            callback=callback,
+            output_dir=output_dir,
+            full_config=full_config,
         )
 
         # Restore parameters to best from stage 1
@@ -147,7 +153,9 @@ def train_ode_parameters(
             param_mask=None,
             phase_name="stage2",
             callback=callback,
-            track_lowest_l1=True
+            track_lowest_l1=True,
+            output_dir=output_dir,
+            full_config=full_config,
         )
 
         # Append stage 2 history
@@ -224,7 +232,9 @@ def train_ode_parameters(
                 basis_scales=basis_scales,
                 param_mask=threshold_mask,
                 phase_name="stage3",
-                callback=callback
+                callback=callback,
+                output_dir=output_dir,
+                full_config=full_config,
             )
 
             # Append stage 3 history
@@ -285,7 +295,9 @@ def train_ode_parameters(
             basis_scales=basis_scales,
             param_mask=None,
             phase_name="train",
-            callback=callback
+            callback=callback,
+            output_dir=output_dir,
+            full_config=full_config,
         )
 
     # Restore best parameters

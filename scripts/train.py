@@ -120,8 +120,11 @@ def train(
     n_iterations_stage3: int = 300,
     threshold_value_stage3: float = 1e-3,
     # TBPTT (Truncated Backpropagation Through Time)
-    use_tbptt: bool = False,
-    tbptt_truncation_steps: int = 5,
+    use_tbptt: bool = None,
+    tbptt_truncation_steps: int = None,
+    # Trajectory plotting during training
+    plot_trajectories: bool = None,
+    plot_trajectory_interval: int = None,
     # Perturbation settings (for robust training)
     perturb_params: bool = False,
     perturb_fold_change: float = 2.0,
@@ -129,6 +132,9 @@ def train(
     # Controller-specific (for static/dynamic controllers)
     controller_order: int = None,
     include_constant: bool = None,
+    # MLP controller-specific (for neural network controllers)
+    n_hidden: int = None,
+    activation: str = None,
     # Initial condition settings
     use_single_ic: bool = None,
     # Estimated model parameters (for model mismatch: train on estimated, test on true)
@@ -156,11 +162,15 @@ def train(
         l1_penalty_stage2: L1 penalty for stage 2
         n_iterations_stage3: Iterations for stage 3
         threshold_value_stage3: Threshold for stage 3
+        plot_trajectories: Enable trajectory plotting during training (overrides default)
+        plot_trajectory_interval: Plot when eval hasn't improved for N evaluations (overrides default)
         perturb_params: Whether to perturb parameters during training (for robust training)
         perturb_fold_change: Fold change for parameter perturbations during training
         n_param_samples_eval: Number of parameter samples per IC during evaluation
         controller_order: Polynomial order for controller (overrides default if applicable)
         include_constant: Include constant term in controller (overrides default if applicable)
+        n_hidden: Number of hidden neurons for MLP controller (overrides default if applicable)
+        activation: Activation function for MLP controller: 'tanh', 'relu', 'sigmoid' (overrides default if applicable)
         use_single_ic: If True, train from single initial state (ignores initial_state_range from config)
         estimated_model_params: JSON string of model parameters for training (e.g., '{"a": 0.6, "b": 0.03}')
                                If provided, controller is trained on this estimated/incorrect model
@@ -196,6 +206,18 @@ def train(
         include_constant = defaults.get('include_constant', True)
     if use_single_ic is None:
         use_single_ic = defaults.get('use_single_ic', False)
+    if use_tbptt is None:
+        use_tbptt = defaults.get('use_tbptt', False)
+    if tbptt_truncation_steps is None:
+        tbptt_truncation_steps = defaults.get('tbptt_truncation_steps', 5)
+    if n_hidden is None:
+        n_hidden = defaults.get('n_hidden', 8)
+    if activation is None:
+        activation = defaults.get('activation', 'tanh')
+    if plot_trajectories is None:
+        plot_trajectories = defaults.get('plot_trajectories', False)
+    if plot_trajectory_interval is None:
+        plot_trajectory_interval = defaults.get('plot_trajectory_interval', 5)
 
     # Setup experiment (seeds, logger)
     logger, seed = setup_experiment(
@@ -224,12 +246,16 @@ def train(
         env_config=env_config,
         controller_order=controller_order,
         include_constant=include_constant,
+        n_hidden=n_hidden,
+        activation=activation,
     )
 
     has_controller = env_config.get('has_controller', True)
     if has_controller:
         print(f"Controller order: {controller_order}")
         print(f"Include constant: {include_constant}")
+        print(f"MLP hidden neurons: {n_hidden}")
+        print(f"MLP activation: {activation}")
 
     print(f"ODE created: {type(true_ode).__name__}")
 
@@ -322,6 +348,8 @@ def train(
         threshold_value_stage3=threshold_value_stage3,
         use_tbptt=use_tbptt,
         tbptt_truncation_steps=tbptt_truncation_steps,
+        plot_trajectories=plot_trajectories,
+        plot_trajectory_interval=plot_trajectory_interval,
     )
 
     # Log configuration
@@ -346,6 +374,8 @@ def train(
         'threshold_value_stage3': threshold_value_stage3,
         'use_tbptt': use_tbptt,
         'tbptt_truncation_steps': tbptt_truncation_steps,
+        'plot_trajectories': plot_trajectories,
+        'plot_trajectory_interval': plot_trajectory_interval,
         'perturb_params': perturb_params,
         'perturb_param_indices': perturb_param_indices,
         'perturb_fold_change': perturb_fold_change,
@@ -361,6 +391,8 @@ def train(
     if has_controller:
         config_dict['controller_order'] = controller_order
         config_dict['include_constant'] = include_constant
+        config_dict['n_hidden'] = n_hidden
+        config_dict['activation'] = activation
         # Add control bounds if available
         if hasattr(ode, 'control_bounds') and ode.control_bounds is not None:
             config_dict['control_bounds'] = ode.control_bounds
@@ -380,6 +412,8 @@ def train(
         config=training_config,
         perturb_params=perturb_params,
         perturb_param_indices=perturb_param_indices,
+        logger=logger,
+        full_config=config_dict,
         perturb_fold_change=perturb_fold_change,
         n_param_samples_eval=n_param_samples_eval,
         eval_interval=eval_interval,

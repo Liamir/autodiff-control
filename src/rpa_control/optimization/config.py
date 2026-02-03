@@ -24,6 +24,9 @@ class TrainingConfig:
     eval_interval: int = 0  # Evaluate every N iterations on fixed ICs (0 = no evaluation)
     eval_initial_states: Optional[List[torch.Tensor]] = None  # Fixed ICs for evaluation (None = no evaluation)
     n_param_samples_eval: int = 10  # Number of parameter samples per IC during evaluation (only used if perturb_param_indices is set)
+    # Trajectory plotting during training
+    plot_trajectories: bool = False  # Enable trajectory plotting during training
+    plot_trajectory_interval: int = 5  # Plot when eval hasn't improved for N evaluations (0 = only plot on improvement and at end)
     # Truncated Backpropagation Through Time (TBPTT)
     use_tbptt: bool = False  # Enable truncated backprop (reduces gradient computation length)
     tbptt_truncation_steps: int = 5  # Number of time steps to backprop through (0 = full BPTT)

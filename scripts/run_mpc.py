@@ -3,6 +3,7 @@ import fire
 import torch
 import matplotlib.pyplot as plt
 import importlib.util
+import time
 from pathlib import Path
 from rpa_control.mpc import MPCController, MPCConfig, simulate_mpc
 from rpa_control.utils import ExperimentLogger
@@ -135,15 +136,23 @@ def run_mpc(
         import json
         initial_state = torch.tensor(json.loads(initial_state), dtype=torch.float32)
 
-    # Construct reference_state from target_vars
-    # Only variables in target_vars contribute to tracking error; others are zero
-    target_vars = env_config.get('target_vars', {})
-    if not target_vars:
-        raise ValueError("Config must specify 'target_vars' for MPC")
+    # Check if using custom MPC cost function or reference tracking
+    mpc_cost_fn = env_config.get('mpc_stage_cost_fn', None)
+    use_custom_cost = mpc_cost_fn is not None
 
-    reference_state = torch.zeros_like(initial_state)
-    for idx, value in target_vars.items():
-        reference_state[idx] = value
+    if use_custom_cost:
+        print("Using custom MPC cost function from config")
+        reference_state = None  # Not needed for custom cost
+        target_vars = {}
+    else:
+        # Construct reference_state from target_vars (reference tracking mode)
+        target_vars = env_config.get('target_vars', {})
+        if not target_vars:
+            raise ValueError("Config must specify 'target_vars' or 'mpc_stage_cost_fn' for MPC")
+
+        reference_state = torch.zeros_like(initial_state)
+        for idx, value in target_vars.items():
+            reference_state[idx] = value
 
     # Get time horizon
     if time_horizon is None:
@@ -237,31 +246,36 @@ def run_mpc(
 
     # Display settings
     print(f"Initial state: {initial_state.tolist()}")
-    print(f"Reference state: {reference_state.tolist()}")
+    if reference_state is not None:
+        print(f"Reference state: {reference_state.tolist()}")
     print(f"Time horizon: {time_horizon}")
     print()
 
     print("MPC Configuration:")
     print(f"  Prediction horizon: {prediction_horizon} steps")
     print(f"  Time step: {dt}")
-    print(f"  Q weights: {Q}")
-    print(f"  Ru (control magnitude): {Ru}")
+    if use_custom_cost:
+        print(f"  Cost function: Custom (from config.mpc_stage_cost_fn)")
+    else:
+        print(f"  Q weights: {Q}")
+        print(f"  Ru (control magnitude): {Ru}")
+        print(f"  Cost type: {cost_type}")
     print(f"  R_deltau (rate-of-change): {R_deltau}")
     print(f"  Control bounds: [{u_min}, {u_max}]")
-    print(f"  Cost type: {cost_type}")
     print()
 
     # Create MPC configuration
     mpc_config = MPCConfig(
         prediction_horizon=prediction_horizon,
         dt=dt,
-        Q=torch.tensor(Q, dtype=torch.float32),
+        Q=torch.tensor(Q, dtype=torch.float32) if not use_custom_cost else None,
         Ru=Ru,
         R_deltau=R_deltau,
         u_min=u_min,
         u_max=u_max,
         ftol=ftol,
-        cost_type=cost_type,
+        cost_type=cost_type if not use_custom_cost else None,
+        stage_cost_fn=mpc_cost_fn,  # Custom cost function (or None)
     )
 
     # Create MPC controller (uses planning ODE for predictions)
@@ -277,18 +291,26 @@ def run_mpc(
 
     # Simulate MPC control (uses true ODE for actual simulation)
     print("Simulating MPC control on true system...")
+    start_time = time.time()
     times, states, controls = simulate_mpc(true_ode, mpc, initial_state, time_horizon, dt)
+    simulation_time = time.time() - start_time
     print(f"Simulation complete! ({len(times)} time steps)")
+    print(f"Total MPC simulation time: {simulation_time:.2f} seconds")
+    print(f"Average time per step: {simulation_time / len(times):.4f} seconds")
     print()
 
     # Print final state
     final_state = states[-1]
     print(f"Final state: {final_state.tolist()}")
-    print(f"Reference state: {reference_state.tolist()}")
+    if reference_state is not None:
+        print(f"Reference state: {reference_state.tolist()}")
 
-    # Compute tracking error
-    final_error = torch.norm(final_state - reference_state).item()
-    print(f"Final tracking error: {final_error:.4f}")
+        # Compute tracking error
+        final_error = torch.norm(final_state - reference_state).item()
+        print(f"Final tracking error: {final_error:.4f}")
+    else:
+        final_error = None
+        print("(No reference state - using custom cost function)")
     print()
 
     # Control statistics
@@ -304,10 +326,14 @@ def run_mpc(
     print(f"  Std: {control_std:.4f}")
     print()
 
-    # Compute tracking metrics
-    tracking_errors = torch.norm(states - reference_state, dim=1)
-    mean_tracking_error = tracking_errors.mean().item()
-    max_tracking_error = tracking_errors.max().item()
+    # Compute tracking metrics (only if using reference tracking)
+    if reference_state is not None:
+        tracking_errors = torch.norm(states - reference_state, dim=1)
+        mean_tracking_error = tracking_errors.mean().item()
+        max_tracking_error = tracking_errors.max().item()
+    else:
+        mean_tracking_error = None
+        max_tracking_error = None
 
     # Total control effort
     total_control_effort = (controls ** 2).sum().item()
@@ -318,17 +344,18 @@ def run_mpc(
         'environment': env_config['name'],
         'experiment_name': experiment_name,
         'method': 'mpc',
+        'use_custom_cost': use_custom_cost,
         'initial_state': initial_state.tolist(),
-        'reference_state': reference_state.tolist(),
+        'reference_state': reference_state.tolist() if reference_state is not None else None,
         'time_horizon': time_horizon,
         'prediction_horizon': prediction_horizon,
         'dt': dt,
-        'Q': Q,
+        'Q': Q if not use_custom_cost else None,
         'Ru': Ru,
         'R_deltau': R_deltau,
         'u_min': u_min,
         'u_max': u_max,
-        'cost_type': cost_type,
+        'cost_type': cost_type if not use_custom_cost else 'custom',
         'ftol': ftol,
         'n_controls': n_controls,
         # Model parameters
@@ -348,7 +375,7 @@ def run_mpc(
         'times': times.tolist(),
         'states': states.tolist(),
         'controls': controls.tolist(),
-        'reference_state': reference_state.tolist(),
+        'reference_state': reference_state.tolist() if reference_state is not None else None,
     }
 
     import json
@@ -370,6 +397,8 @@ def run_mpc(
         'control_std': control_std,
         'total_control_effort': total_control_effort,
         'n_timesteps': len(times),
+        'simulation_time_seconds': simulation_time,
+        'avg_time_per_step_seconds': simulation_time / len(times),
     }
 
     logger.log_results(summary, controller_summary="")
