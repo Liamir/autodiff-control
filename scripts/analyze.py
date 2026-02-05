@@ -320,6 +320,61 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
         print(f"  Saved to: {filename}")
         print()
 
+        # Plot state space trajectory (scatter plot with control as color)
+        if n_states >= 2:
+            print("Generating state space plot...")
+
+            # For 2D state space
+            A = states[:, 0]
+            B = states[:, 1]
+
+            # Controls are one step shorter than states
+            A_control = A[:-1]
+            B_control = B[:-1]
+
+            # Flatten controls if needed
+            if n_controls == 1:
+                u = controls.flatten() if len(controls.shape) > 1 else controls
+            else:
+                u = controls[:, 0]
+
+            # Create figure
+            fig, ax = plt.subplots(figsize=(10, 8))
+
+            # Scatter plot with control as color
+            scatter = ax.scatter(A_control, B_control, c=u, cmap='viridis',
+                                s=50, alpha=0.7, edgecolors='black', linewidth=0.5)
+
+            # Add colorbar
+            cbar = plt.colorbar(scatter, ax=ax)
+            cbar.set_label(f'{control_names[0]} (control signal)', rotation=270, labelpad=20)
+
+            # Mark start and end points
+            ax.plot(A[0], B[0], 'go', markersize=12, label='Start', zorder=5)
+            ax.plot(A[-1], B[-1], 'rs', markersize=12, label='End', zorder=5)
+
+            # Add trajectory line (faint)
+            ax.plot(A, B, 'k-', alpha=0.2, linewidth=1, zorder=1)
+
+            # Reference state (target)
+            ax.plot(reference_state[0], reference_state[1], 'r*',
+                   markersize=15, label='Target', zorder=5)
+
+            ax.set_xlabel(state_var_names[0], fontsize=12)
+            ax.set_ylabel(state_var_names[1], fontsize=12)
+            ax.set_title('Trained Controller Trajectory in State Space (colored by control)', fontsize=14)
+            ax.legend(loc='best')
+            ax.grid(True, alpha=0.3)
+            ax.spines['right'].set_visible(False)
+            ax.spines['top'].set_visible(False)
+
+            plt.tight_layout()
+
+            filename = exp_path / 'state_space.pdf'
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            print(f"  Saved to: {filename}")
+            print()
+
     # Plot trajectories (comparison with uncontrolled - legacy approach)
     elif plot_trajectories:
         print("Generating trajectory plots...")
@@ -401,7 +456,7 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
     print("="*60)
 
 
-def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True):
+def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True, plot_state_space=True):
     """Analyze MPC experiment results."""
     import matplotlib.pyplot as plt
 
@@ -530,6 +585,62 @@ def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True):
         plt.tight_layout()
 
         filename = exp_path / 'mpc_trajectory.pdf'
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"  Saved to: {filename}")
+        print()
+
+    # Plot state space trajectory (scatter plot with control as color)
+    if plot_state_space and states.shape[1] >= 2:
+        print("Generating state space plot...")
+
+        # For 2D state space
+        A = states[:, 0]
+        B = states[:, 1]
+
+        # Controls are one step shorter than states
+        A_control = A[:-1]
+        B_control = B[:-1]
+
+        # Flatten controls if needed
+        if len(controls.shape) > 1:
+            u = controls[:, 0]
+        else:
+            u = controls
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        # Scatter plot with control as color
+        scatter = ax.scatter(A_control, B_control, c=u, cmap='viridis',
+                            s=50, alpha=0.7, edgecolors='black', linewidth=0.5)
+
+        # Add colorbar
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label(f'{control_names[0]} (control signal)', rotation=270, labelpad=20)
+
+        # Mark start and end points
+        ax.plot(A[0], B[0], 'go', markersize=12, label='Start', zorder=5)
+        ax.plot(A[-1], B[-1], 'rs', markersize=12, label='End', zorder=5)
+
+        # Add trajectory line (faint)
+        ax.plot(A, B, 'k-', alpha=0.2, linewidth=1, zorder=1)
+
+        # Reference state if available
+        if not use_custom_cost:
+            ax.plot(reference_state[0], reference_state[1], 'r*',
+                   markersize=15, label='Reference', zorder=5)
+
+        ax.set_xlabel(state_var_names[0], fontsize=12)
+        ax.set_ylabel(state_var_names[1], fontsize=12)
+        ax.set_title('MPC Trajectory in State Space (colored by control)', fontsize=14)
+        ax.legend(loc='best')
+        ax.grid(True, alpha=0.3)
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
+
+        plt.tight_layout()
+
+        filename = exp_path / 'mpc_state_space.pdf'
         plt.savefig(filename, dpi=300, bbox_inches='tight')
         print(f"  Saved to: {filename}")
         print()

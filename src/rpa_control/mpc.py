@@ -317,7 +317,8 @@ class MPCController:
 
         # Initial guess (warm-start from previous solution)
         if self.u_guess is None:
-            self.u_guess = np.zeros(N)
+            # Initialize at nominal control u=1.0
+            self.u_guess = np.ones(N)
 
         # Bounds
         bounds = [(self.config.u_min, self.config.u_max) for _ in range(N)]
