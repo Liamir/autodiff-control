@@ -45,7 +45,7 @@ def reward_fn(state, time=None):
         Reward (to maximize)
     """
     y = state[1]
-    deviation = (y - Y_SS)**2
+    deviation = 100 * (y - Y_SS)**2
     return deviation
 
 
@@ -170,7 +170,7 @@ Note: Control modulates the input signal effect on both equations.""",
 
     # Default training settings
     'defaults': {
-        'time_horizon': 20.0,
+        'time_horizon': 15.0,
         'n_reward_steps': 200,
         'steady_state_fraction': 0.5,
         'learning_rate': 0.01,
@@ -192,11 +192,11 @@ Note: Control modulates the input signal effect on both equations.""",
 
     # MPC settings
     'mpc_defaults': {
-        'prediction_horizon': 20,
+        'prediction_horizon': 15,
         'dt': 0.1,                # Time step size
         'Q': [1.0, 1.0],           # State tracking weights [x, y]
         'Ru': 0.0,                 # Control magnitude weight
-        'R_deltau': 0.0,           # Control rate-of-change weight
+        'R_deltau': 0.1,           # Control rate-of-change weight
         'u_min': 0.5,              # Minimum control input
         'u_max': 2.0,              # Maximum control input
         'cost_type': 'quadratic',

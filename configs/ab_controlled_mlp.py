@@ -15,7 +15,6 @@ def reward_fn(state, time=None):
     """Reward function: maximize |B| (resonance behavior).
     """
     B_norm = torch.abs(state[1])
-    # -1 / e^B_norm
     return B_norm
 
 
@@ -34,11 +33,8 @@ def mpc_stage_cost_fn(x_next, u, x_curr=None, k=None):
     # Reuse training reward function
     reward = reward_fn(x_next)
 
-    # Add control penalty to avoid excessive control
-    control_penalty = 0.01 * (u**2)
-
     # MPC minimizes cost, training maximizes reward
-    cost = -reward + control_penalty
+    cost = -reward
 
     return cost
 
@@ -140,7 +136,7 @@ Note: With u=1, system is unstable. MLP learns control to amplify B.""",
 
     # Default training settings
     'defaults': {
-        'time_horizon': 10.0,
+        'time_horizon': 20.0,
         'n_reward_steps': 100,
         'steady_state_fraction': 0.5,
         'learning_rate': 0.01,  # May need tuning for MLP
@@ -165,7 +161,7 @@ Note: With u=1, system is unstable. MLP learns control to amplify B.""",
         'prediction_horizon': 20,
         'dt': 0.1,
         'Q': [1.0, 1.0],           # State tracking weights [A, B]
-        'Ru': 0.1,                  # Control magnitude weight
+        'Ru': 0.0,                  # Control magnitude weight
         'R_deltau': 0.1,           # Control rate-of-change weight
         'u_min': 0.2,              # Minimum control input
         'u_max': 1.0,              # Maximum control input

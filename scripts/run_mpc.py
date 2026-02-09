@@ -76,6 +76,9 @@ def run_mpc(
     u_max: float = None,
     cost_type: str = None,
     ftol: float = None,
+    # Solver
+    solver: str = None,
+    warm_start: bool = None,
     # Estimated model parameters (for model mismatch: plan with estimated, simulate with true)
     estimated_model_params: str = None,
 ):
@@ -96,6 +99,8 @@ def run_mpc(
         u_max: Maximum control input (default: from config)
         cost_type: Cost function type ('quadratic' or 'l1', default: from config)
         ftol: Optimization tolerance (default: from config)
+        solver: Optimization solver ('slsqp' or 'ipopt', default: from config or 'slsqp')
+        warm_start: Use previous solution to initialize next optimization (default: True)
         estimated_model_params: JSON string of model parameters for planning (e.g., '{"a": 0.6, "b": 0.03}')
                                If provided, MPC uses this estimated/incorrect model for planning
                                but the true model (config defaults) for simulation. This simulates
@@ -181,6 +186,11 @@ def run_mpc(
     if ftol is None:
         ftol = mpc_defaults.get('ftol', 1e-3)
 
+    if solver is None:
+        solver = mpc_defaults.get('solver', 'slsqp')
+    if warm_start is None:
+        warm_start = mpc_defaults.get('warm_start', True)
+
     n_controls = mpc_defaults.get('n_controls', 1)
 
     # Print environment description
@@ -262,6 +272,8 @@ def run_mpc(
         print(f"  Cost type: {cost_type}")
     print(f"  R_deltau (rate-of-change): {R_deltau}")
     print(f"  Control bounds: [{u_min}, {u_max}]")
+    print(f"  Solver: {solver}")
+    print(f"  Warm start: {warm_start}")
     print()
 
     # Create MPC configuration
@@ -276,6 +288,8 @@ def run_mpc(
         ftol=ftol,
         cost_type=cost_type if not use_custom_cost else None,
         stage_cost_fn=mpc_cost_fn,  # Custom cost function (or None)
+        solver=solver,
+        warm_start=warm_start,
     )
 
     # Create MPC controller (uses planning ODE for predictions)
@@ -357,6 +371,8 @@ def run_mpc(
         'u_max': u_max,
         'cost_type': cost_type if not use_custom_cost else 'custom',
         'ftol': ftol,
+        'solver': solver,
+        'warm_start': warm_start,
         'n_controls': n_controls,
         # Model parameters
         'planning_model_params': planning_model_params.get('model_params'),

@@ -37,6 +37,8 @@ class MPCConfig:
         cost_type: str = 'quadratic',
         tracked_state_indices: Optional[list[int]] = None,
         stage_cost_fn: Optional[callable] = None,
+        solver: str = 'slsqp',
+        warm_start: bool = True,
     ):
         """Initialize MPC configuration.
 
@@ -57,6 +59,8 @@ class MPCConfig:
             stage_cost_fn: Optional custom stage cost function with signature:
                            stage_cost_fn(x_next, u, x_curr=None, k=None) -> float
                            If None, uses reference tracking cost (Q, Ru, R_deltau)
+            solver: Optimization solver ('slsqp' or 'ipopt')
+            warm_start: Use previous solution to initialize next optimization (default: True)
         """
         self.prediction_horizon = prediction_horizon
         self.dt = dt
@@ -72,6 +76,8 @@ class MPCConfig:
         self.cost_type = cost_type
         self.tracked_state_indices = tracked_state_indices
         self.stage_cost_fn = stage_cost_fn
+        self.solver = solver.lower()
+        self.warm_start = warm_start
 
 
 class MPCController:
@@ -315,28 +321,42 @@ class MPCController:
         N = self.config.prediction_horizon
         x0_np = x_current.detach().numpy()
 
-        # Initial guess (warm-start from previous solution)
-        if self.u_guess is None:
-            # Initialize at nominal control u=1.0
+        # Initial guess
+        if self.u_guess is None or not self.config.warm_start:
             self.u_guess = np.ones(N)
 
         # Bounds
         bounds = [(self.config.u_min, self.config.u_max) for _ in range(N)]
 
         # Optimize
-        res = minimize(
-            self._mpc_objective,
-            self.u_guess,
-            args=(x0_np,),
-            method='SLSQP',
-            bounds=bounds,
-            options={
-                'ftol': self.config.ftol,
-                'disp': self.config.disp,
-                'maxiter': 100,
-                'eps': 1e-4,  # Larger step for gradient estimation to survive float32 conversion
-            }
-        )
+        if self.config.solver == 'ipopt':
+            from cyipopt import minimize_ipopt
+            res = minimize_ipopt(
+                self._mpc_objective,
+                self.u_guess,
+                args=(x0_np,),
+                bounds=bounds,
+                options={
+                    'tol': self.config.ftol,
+                    'maxiter': 100,
+                    'print_level': 5 if self.config.disp else 0,
+                    'hessian_approximation': 'limited-memory',
+                }
+            )
+        else:
+            res = minimize(
+                self._mpc_objective,
+                self.u_guess,
+                args=(x0_np,),
+                method='SLSQP',
+                bounds=bounds,
+                options={
+                    'ftol': self.config.ftol,
+                    'disp': self.config.disp,
+                    'maxiter': 100,
+                    'eps': 1e-4,  # Larger step for gradient estimation to survive float32 conversion
+                }
+            )
 
         u_optimal = res.x
         u_control = u_optimal[0]

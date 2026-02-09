@@ -33,7 +33,7 @@ ode = IFFL2Vars(fixed_params=FIXED_PARAMS, input_signal=constant_input)
 x0 = torch.tensor([10.0, 0.1])
 
 # Time span
-t_eval = torch.linspace(0.0, 60.0, 600)
+t_eval = torch.linspace(0.0, 30.0, 600)
 times = t_eval.numpy()
 
 print("Comparing control strategies for destabilization")
@@ -61,12 +61,8 @@ def simulate_with_control(control_func, name):
     deviations = (y_vals - y_ss_val)**2
     cumulative_reward = deviations.sum()
 
-    # Reward within MPC horizon (first 20 steps)
-    cumulative_reward_20 = deviations[:20].sum()
-
     print(f"\n{name}:")
-    print(f"  Cumulative reward (full 60s): {cumulative_reward:.4f}")
-    print(f"  Cumulative reward (first 20 steps): {cumulative_reward_20:.4f}")
+    print(f"  Cumulative reward (full 30s): {cumulative_reward:.4f}")
     print(f"  Mean deviation²: {deviations.mean():.6f}")
     print(f"  Max |y - y_ss|: {np.abs(y_vals - y_ss_val).max():.6f}")
     print(f"  Final state: x={states_np[-1, 0]:.4f}, y={states_np[-1, 1]:.4f}")
@@ -118,7 +114,7 @@ print("="*60)
 
 # Plot comparison
 set_style()
-fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+fig, axes = plt.subplots(4, 1, figsize=(12, 13))
 
 # Plot y trajectories
 ax = axes[0]
@@ -150,8 +146,23 @@ ax.grid(True, alpha=0.3)
 ax.spines['right'].set_visible(False)
 ax.spines['top'].set_visible(False)
 
-# Plot control signals
+# Plot cumulative deviation
 ax = axes[2]
+dt = times[1] - times[0]
+ax.plot(times, np.cumsum(dev_low) * dt, 'b-', linewidth=2, label='Constant u=0.5', alpha=0.7)
+ax.plot(times, np.cumsum(dev_high) * dt, 'r-', linewidth=2, label='Constant u=2.0', alpha=0.7)
+ax.plot(times, np.cumsum(dev_osc10) * dt, 'g-', linewidth=2, label='Osc(20s)', alpha=0.7)
+ax.plot(times, np.cumsum(dev_osc5) * dt, 'm-', linewidth=2, label='Osc(10s)', alpha=0.7)
+ax.plot(times, np.cumsum(dev_osc2) * dt, 'c-', linewidth=2, label='Osc(4s)', alpha=0.7)
+ax.set_ylabel(r'$\int (y - y_{ss})^2 \, dt$')
+ax.set_title('Cumulative Deviation')
+ax.legend(ncol=2)
+ax.grid(True, alpha=0.3)
+ax.spines['right'].set_visible(False)
+ax.spines['top'].set_visible(False)
+
+# Plot control signals
+ax = axes[3]
 ax.plot(times, controls_low, 'b-', linewidth=2, label='Constant u=0.5', alpha=0.7)
 ax.plot(times, controls_high, 'r-', linewidth=2, label='Constant u=2.0', alpha=0.7)
 ax.plot(times, controls_osc10, 'g-', linewidth=2, label='Osc(20s)', alpha=0.7)
