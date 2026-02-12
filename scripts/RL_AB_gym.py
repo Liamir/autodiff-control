@@ -48,20 +48,23 @@ def _best_params_path(algo: str) -> Path:
 # Environment factory
 # ---------------------------------------------------------------------------
 
+
 def make_env():
     """Create an ABGym instance with default settings."""
+
     def _init():
         return ABGym(
             reward_fn=lambda state, time: state[1] ** 2,
             initial_state=torch.tensor([0.0, 1.0]),
-            time_horizon=10.0,
+            time_horizon=5,
             dt=0.1,
-            n_reward_steps=300,
+            n_reward_steps=150,
             alpha=50.0,
             action_low=0.1,
             action_high=1.0,
             ode_method="rk4",
         )
+
     return _init
 
 
@@ -94,23 +97,25 @@ def sample_td3_params(trial: optuna.Trial) -> dict:
     net_arch = trial.suggest_categorical("net_arch", ["small", "medium", "big"])
 
     trial.set_user_attr("gamma", 1 - one_minus_gamma)
-    trial.set_user_attr("batch_size", 2 ** batch_size_pow)
+    trial.set_user_attr("batch_size", 2**batch_size_pow)
 
     n_actions = 1
     action_noise = None
     if noise_type == "normal":
         action_noise = NormalActionNoise(
-            mean=np.zeros(n_actions), sigma=noise_std * np.ones(n_actions),
+            mean=np.zeros(n_actions),
+            sigma=noise_std * np.ones(n_actions),
         )
     elif noise_type == "ornstein-uhlenbeck":
         action_noise = OrnsteinUhlenbeckActionNoise(
-            mean=np.zeros(n_actions), sigma=noise_std * np.ones(n_actions),
+            mean=np.zeros(n_actions),
+            sigma=noise_std * np.ones(n_actions),
         )
 
     return {
         "gamma": 1 - one_minus_gamma,
         "learning_rate": learning_rate,
-        "batch_size": 2 ** batch_size_pow,
+        "batch_size": 2**batch_size_pow,
         "train_freq": train_freq,
         "tau": tau,
         "action_noise": action_noise,
@@ -133,11 +138,11 @@ def sample_ppo_params(trial: optuna.Trial) -> dict:
     activation_fn = trial.suggest_categorical("activation_fn", ["tanh", "relu"])
 
     trial.set_user_attr("gamma", 1 - one_minus_gamma)
-    trial.set_user_attr("n_steps", 2 ** n_steps_pow)
-    trial.set_user_attr("batch_size", 2 ** batch_size_pow)
+    trial.set_user_attr("n_steps", 2**n_steps_pow)
+    trial.set_user_attr("batch_size", 2**batch_size_pow)
 
-    n_steps = 2 ** n_steps_pow
-    batch_size = 2 ** batch_size_pow
+    n_steps = 2**n_steps_pow
+    batch_size = 2**batch_size_pow
     # batch_size must divide n_steps for PPO
     if batch_size > n_steps:
         batch_size = n_steps
@@ -165,6 +170,7 @@ SAMPLER = {"td3": sample_td3_params, "ppo": sample_ppo_params}
 # ---------------------------------------------------------------------------
 # Custom W&B histogram callback
 # ---------------------------------------------------------------------------
+
 
 class WandbHistogramCallback(BaseCallback):
     """Log observation / reward histograms and gradient norms to W&B."""
@@ -207,6 +213,7 @@ class WandbHistogramCallback(BaseCallback):
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
+
 
 def plot_trajectory(model, env):
     """Run one episode and plot A(t), B(t)."""
@@ -272,10 +279,13 @@ class WandbPlotCallback(BaseCallback):
         fig_traj = plot_trajectory(self.model, env)
         fig_ctrl = plot_control_field(self.model)
 
-        wandb.log({
-            "plots/trajectory": wandb.Image(fig_traj),
-            "plots/control_field": wandb.Image(fig_ctrl),
-        }, step=self.num_timesteps)
+        wandb.log(
+            {
+                "plots/trajectory": wandb.Image(fig_traj),
+                "plots/control_field": wandb.Image(fig_ctrl),
+            },
+            step=self.num_timesteps,
+        )
 
         plt.close(fig_traj)
         plt.close(fig_ctrl)
@@ -286,6 +296,7 @@ class WandbPlotCallback(BaseCallback):
 # ---------------------------------------------------------------------------
 # Optuna objective
 # ---------------------------------------------------------------------------
+
 
 def _evaluate_policy(model, env, n_episodes: int = 5) -> float:
     """Run n_episodes and return mean total reward."""
@@ -328,6 +339,7 @@ def _make_objective(algo: str, steps_per_trial: int, n_eval_episodes: int):
 # Param loading
 # ---------------------------------------------------------------------------
 
+
 def _load_best_td3_params(raw: dict) -> dict:
     """Reconstruct TD3-ready params from saved JSON."""
     n_actions = 1
@@ -336,11 +348,13 @@ def _load_best_td3_params(raw: dict) -> dict:
     action_noise = None
     if noise_type == "normal":
         action_noise = NormalActionNoise(
-            mean=np.zeros(n_actions), sigma=noise_std * np.ones(n_actions),
+            mean=np.zeros(n_actions),
+            sigma=noise_std * np.ones(n_actions),
         )
     elif noise_type == "ornstein-uhlenbeck":
         action_noise = OrnsteinUhlenbeckActionNoise(
-            mean=np.zeros(n_actions), sigma=noise_std * np.ones(n_actions),
+            mean=np.zeros(n_actions),
+            sigma=noise_std * np.ones(n_actions),
         )
 
     return {
@@ -397,6 +411,7 @@ def _load_best_params(algo: str) -> dict:
 # ---------------------------------------------------------------------------
 # CLI entry points
 # ---------------------------------------------------------------------------
+
 
 def search(
     algo: str = "ppo",
