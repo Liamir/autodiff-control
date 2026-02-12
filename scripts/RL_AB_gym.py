@@ -21,6 +21,7 @@ import torch
 import wandb
 from stable_baselines3 import PPO, TD3
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.noise import (
     NormalActionNoise,
     OrnsteinUhlenbeckActionNoise,
@@ -56,6 +57,7 @@ def make_env():
         return ABGym(
             reward_fn=lambda state, time: state[1] ** 2,
             initial_state=torch.tensor([0.0, 1.0]),
+            # initial_state=torch.rand(2)*2,  # random initial state - two values in [0, 2]
             time_horizon=5,
             dt=0.1,
             n_reward_steps=150,
@@ -141,7 +143,8 @@ def sample_ppo_params(trial: optuna.Trial) -> dict:
     trial.set_user_attr("n_steps", 2**n_steps_pow)
     trial.set_user_attr("batch_size", 2**batch_size_pow)
 
-    n_steps = 2**n_steps_pow
+    # n_steps = 2**n_steps_pow
+    n_steps = 150  # TODO - artificial - one epoch per env
     batch_size = 2**batch_size_pow
     # batch_size must divide n_steps for PPO
     if batch_size > n_steps:
@@ -314,14 +317,14 @@ def _evaluate_policy(model, env, n_episodes: int = 5) -> float:
     return float(np.mean(total_rewards))
 
 
-def _make_objective(algo: str, steps_per_trial: int, n_eval_episodes: int):
+def _make_objective(algo: str, steps_per_trial: int, n_eval_episodes: int, n_envs: int):
     """Return an Optuna objective function (closure over budget + algo)."""
     algo_cls = ALGO_CLS[algo]
     sampler_fn = SAMPLER[algo]
 
     def objective(trial: optuna.Trial) -> float:
         params = sampler_fn(trial)
-        env = make_env()()
+        env = SubprocVecEnv([make_env() for _ in range(n_envs)])
         eval_env = make_env()()
 
         model = algo_cls("MlpPolicy", env, verbose=0, device="cpu", **params)
@@ -419,6 +422,7 @@ def search(
     steps_per_trial: int = 20000,
     n_eval_episodes: int = 5,
     n_jobs: int = 1,
+    n_envs: int = 4,
 ):
     """Run Optuna hyperparameter search.
 
@@ -428,12 +432,13 @@ def search(
         steps_per_trial: Training steps per trial.
         n_eval_episodes: Episodes for evaluation after each trial.
         n_jobs: Number of parallel workers (-1 for all CPUs).
+        n_envs: Number of parallel environments per trial.
     """
     algo = algo.lower()
     assert algo in ALGO_CLS, f"Unknown algo '{algo}', choose from {list(ALGO_CLS)}"
 
     study = optuna.create_study(direction="maximize")
-    objective = _make_objective(algo, steps_per_trial, n_eval_episodes)
+    objective = _make_objective(algo, steps_per_trial, n_eval_episodes, n_envs)
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
 
     print(f"\nBest trial reward: {study.best_trial.value:.4f}")
@@ -446,13 +451,14 @@ def search(
     print(f"Saved best params to {path}")
 
 
-def train(algo: str = "ppo", total_timesteps: int = 200000, log_freq: int = 1000):
+def train(algo: str = "ppo", total_timesteps: int = 200000, log_freq: int = 1000, n_envs: int = 4):
     """Train on ABGym with W&B logging using best Optuna params.
 
     Args:
         algo: Algorithm to train ("ppo" or "td3").
         total_timesteps: Total environment steps.
         log_freq: Steps between histogram logs.
+        n_envs: Number of parallel environments.
     """
     algo = algo.lower()
     assert algo in ALGO_CLS, f"Unknown algo '{algo}', choose from {list(ALGO_CLS)}"
@@ -465,7 +471,7 @@ def train(algo: str = "ppo", total_timesteps: int = 200000, log_freq: int = 1000
         sync_tensorboard=True,
     )
 
-    env = make_env()()
+    env = SubprocVecEnv([make_env() for _ in range(n_envs)])
     eval_env = make_env()()
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -503,10 +509,11 @@ def all(
     steps_per_trial: int = 20000,
     total_timesteps: int = 200000,
     n_jobs: int = 1,
+    n_envs: int = 4,
 ):
     """Run search then train."""
-    search(algo=algo, n_trials=n_trials, steps_per_trial=steps_per_trial, n_jobs=n_jobs)
-    train(algo=algo, total_timesteps=total_timesteps)
+    search(algo=algo, n_trials=n_trials, steps_per_trial=steps_per_trial, n_jobs=n_jobs, n_envs=n_envs)
+    train(algo=algo, total_timesteps=total_timesteps, n_envs=n_envs)
 
 
 if __name__ == "__main__":
