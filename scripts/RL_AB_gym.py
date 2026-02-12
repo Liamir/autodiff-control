@@ -312,7 +312,7 @@ def _make_objective(algo: str, steps_per_trial: int, n_eval_episodes: int):
         env = make_env()()
         eval_env = make_env()()
 
-        model = algo_cls("MlpPolicy", env, verbose=0, **params)
+        model = algo_cls("MlpPolicy", env, verbose=0, device="cpu", **params)
         model.learn(total_timesteps=steps_per_trial)
 
         mean_reward = _evaluate_policy(model, eval_env, n_episodes=n_eval_episodes)
@@ -455,7 +455,7 @@ def train(algo: str = "ppo", total_timesteps: int = 200000, log_freq: int = 1000
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     algo_cls = ALGO_CLS[algo]
-    model = algo_cls("MlpPolicy", env, verbose=1, tensorboard_log=f"runs/{run.id}", **params)
+    model = algo_cls("MlpPolicy", env, verbose=1, device="cpu", tensorboard_log=f"runs/{run.id}", **params)
 
     callbacks = [
         WandbCallback(model_save_path=str(MODEL_DIR), verbose=1),
