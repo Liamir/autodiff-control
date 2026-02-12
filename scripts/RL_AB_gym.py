@@ -60,6 +60,7 @@ def make_env():
             alpha=50.0,
             action_low=0.1,
             action_high=1.0,
+            ode_method="rk4",
         )
     return _init
 
