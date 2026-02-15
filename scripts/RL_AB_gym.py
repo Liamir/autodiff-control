@@ -31,7 +31,9 @@ from wandb.integration.sb3 import WandbCallback
 from rpasim.gyms import ABGym
 
 SCRIPT_DIR = Path(__file__).parent
-MODEL_DIR = SCRIPT_DIR.parent / "models"
+PROJECT_ROOT = SCRIPT_DIR.parent
+MODEL_DIR = PROJECT_ROOT / "models"
+PARAM_DIR = PROJECT_ROOT / "model_params"
 
 ALGO_CLS = {"td3": TD3, "ppo": PPO}
 
@@ -42,7 +44,11 @@ ACTIVATION_FN_MAP = {
 
 
 def _best_params_path(algo: str) -> Path:
-    return SCRIPT_DIR / f"best_{algo}_params.json"
+    return PARAM_DIR / f"best_{algo}_params.json"
+
+
+def _default_model_path(algo: str) -> Path:
+    return MODEL_DIR / f"{algo}_ab_final"
 
 
 # ---------------------------------------------------------------------------
@@ -55,10 +61,9 @@ def make_env():
 
     def _init():
         return ABGym(
-            reward_fn=lambda state, time: state[1] ** 2,
-            initial_state=torch.tensor([0.0, 1.0]),
-            # initial_state=torch.rand(2)*2,  # random initial state - two values in [0, 2]
-            time_horizon=5,
+            reward_fn=lambda state, time: (1 - state[1]) ** 2,
+            initial_state=torch.tensor([0.0, 0.0]),
+            time_horizon=5.0,
             dt=0.1,
             n_reward_steps=150,
             alpha=50.0,
@@ -219,26 +224,38 @@ class WandbHistogramCallback(BaseCallback):
 
 
 def plot_trajectory(model, env):
-    """Run one episode and plot A(t), B(t)."""
+    """Run one episode and plot A(t), B(t), u(t) on separate axes."""
     obs, _ = env.reset()
     observations = [obs.copy()]
+    actions = []
     done = False
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, _, terminated, truncated, _ = env.step(action)
         observations.append(obs.copy())
+        actions.append(float(action[0]))
         done = terminated or truncated
 
     traj = np.array(observations)
-    t = np.arange(len(traj)) * env.dt
+    t_states = np.arange(len(traj)) * env.dt
+    t_actions = np.arange(len(actions)) * env.dt
 
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.plot(t, traj[:, 0], label="A")
-    ax.plot(t, traj[:, 1], label="B")
-    ax.set_xlabel("time")
-    ax.set_ylabel("state")
-    ax.legend(frameon=False, bbox_to_anchor=(1, 1))
-    sns.despine(ax=ax)
+    fig, (ax_a, ax_b, ax_u) = plt.subplots(3, 1, figsize=(6, 5), sharex=True)
+
+    ax_a.plot(t_states, traj[:, 0])
+    ax_a.set_ylabel("A")
+    sns.despine(ax=ax_a)
+
+    ax_b.plot(t_states, traj[:, 1])
+    ax_b.axhline(1.0, color="gray", linestyle="--", linewidth=0.8)
+    ax_b.set_ylabel("B")
+    sns.despine(ax=ax_b)
+
+    ax_u.step(t_actions, actions, where="post")
+    ax_u.set_xlabel("time")
+    ax_u.set_ylabel("u")
+    sns.despine(ax=ax_u)
+
     fig.tight_layout()
     return fig
 
@@ -445,6 +462,7 @@ def search(
     print(f"Best params: {study.best_params}")
 
     path = _best_params_path(algo)
+    path.parent.mkdir(parents=True, exist_ok=True)
     serializable = {k: v for k, v in study.best_params.items()}
     with open(path, "w") as f:
         json.dump(serializable, f, indent=2)
@@ -494,7 +512,7 @@ def train(algo: str = "ppo", total_timesteps: int = 200000, log_freq: int = 1000
 
     model.learn(total_timesteps=total_timesteps, callback=callbacks)
 
-    final_path = MODEL_DIR / f"{algo}_ab_final"
+    final_path = _default_model_path(algo)
     model.save(str(final_path))
     print(f"Final model saved to {final_path}")
 
@@ -516,5 +534,31 @@ def all(
     train(algo=algo, total_timesteps=total_timesteps, n_envs=n_envs)
 
 
+def plot(algo: str = "ppo", model_path: str = None):
+    """Plot trajectory from a saved model.
+
+    Args:
+        algo: Algorithm ("ppo" or "td3").
+        model_path: Path to saved model. Defaults to models/<algo>_ab_final.
+    """
+    algo = algo.lower()
+    algo_cls = ALGO_CLS[algo]
+
+    if model_path is None:
+        model_path = str(_default_model_path(algo))
+    model = algo_cls.load(model_path, device="cpu")
+
+    eval_env = make_env()()
+    fig = plot_trajectory(model, eval_env)
+    eval_env.close()
+
+    out_dir = PROJECT_ROOT / "plots" / "AB" / algo
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"test_{algo}_trajectory.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved to {out_path}")
+
+
 if __name__ == "__main__":
-    fire.Fire({"search": search, "train": train, "all": all})
+    fire.Fire({"search": search, "train": train, "all": all, "plot": plot})

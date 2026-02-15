@@ -1,0 +1,13 @@
+{
+  "batch_size_pow": 4,
+  "n_steps_pow": 12,
+  "one_minus_gamma": 0.0038195259269231557,
+  "one_minus_gae_lambda": 0.01616183277469071,
+  "learning_rate": 7.077126833102098e-05,
+  "ent_coef": 0.04689457917780043,
+  "clip_range": 0.4,
+  "n_epochs": 20,
+  "max_grad_norm": 0.6994208907241602,
+  "net_arch": "medium",
+  "activation_fn": "relu"
+}
