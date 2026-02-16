@@ -192,6 +192,7 @@ def run_mpc(
         warm_start = mpc_defaults.get('warm_start', True)
 
     n_controls = mpc_defaults.get('n_controls', 1)
+    integration_substeps = mpc_defaults.get('integration_substeps', 1)
 
     # Print environment description
     if 'description' in env_config:
@@ -290,6 +291,7 @@ def run_mpc(
         stage_cost_fn=mpc_cost_fn,  # Custom cost function (or None)
         solver=solver,
         warm_start=warm_start,
+        integration_substeps=integration_substeps,
     )
 
     # Create MPC controller (uses planning ODE for predictions)
@@ -339,6 +341,23 @@ def run_mpc(
     print(f"  Mean: {control_mean:.4f}")
     print(f"  Std: {control_std:.4f}")
     print()
+
+    # Compute reward statistics (if reward_fn available)
+    reward_fn = env_config.get('reward_fn', None)
+    if reward_fn is not None:
+        rewards = torch.tensor([reward_fn(s).item() if torch.is_tensor(reward_fn(s)) else reward_fn(s) for s in states])
+        total_reward = rewards.sum().item()
+        mean_reward = rewards.mean().item()
+        final_reward = rewards[-1].item()
+        print(f"Reward statistics:")
+        print(f"  Total:  {total_reward:.4f}")
+        print(f"  Mean:   {mean_reward:.4f}")
+        print(f"  Final:  {final_reward:.4f}")
+        print()
+    else:
+        total_reward = None
+        mean_reward = None
+        final_reward = None
 
     # Compute tracking metrics (only if using reference tracking)
     if reference_state is not None:
@@ -407,6 +426,9 @@ def run_mpc(
         'final_tracking_error': final_error,
         'mean_tracking_error': mean_tracking_error,
         'max_tracking_error': max_tracking_error,
+        'total_reward': total_reward,
+        'mean_reward': mean_reward,
+        'final_reward': final_reward,
         'control_min': control_min,
         'control_max': control_max,
         'control_mean': control_mean,

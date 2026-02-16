@@ -39,12 +39,13 @@ class MPCConfig:
         stage_cost_fn: Optional[callable] = None,
         solver: str = 'slsqp',
         warm_start: bool = True,
+        integration_substeps: int = 1,
     ):
         """Initialize MPC configuration.
 
         Args:
             prediction_horizon: Number of steps to predict ahead
-            dt: Time step
+            dt: Time step (control grid spacing)
             Q: State tracking weight (diagonal of Q matrix for quadratic, or vector for L1)
             Ru: Control magnitude weight
             R_deltau: Control rate-of-change weight
@@ -61,6 +62,10 @@ class MPCConfig:
                            If None, uses reference tracking cost (Q, Ru, R_deltau)
             solver: Optimization solver ('slsqp' or 'ipopt')
             warm_start: Use previous solution to initialize next optimization (default: True)
+            integration_substeps: Number of RK4 sub-steps per control interval (default: 1).
+                                  Higher values improve integration accuracy without adding
+                                  decision variables. Use when dt is too coarse for stable
+                                  integration but the control grid is fine.
         """
         self.prediction_horizon = prediction_horizon
         self.dt = dt
@@ -78,6 +83,7 @@ class MPCConfig:
         self.stage_cost_fn = stage_cost_fn
         self.solver = solver.lower()
         self.warm_start = warm_start
+        self.integration_substeps = integration_substeps
 
 
 class MPCController:
@@ -167,18 +173,19 @@ class MPCController:
             self.cost_type = None
             self.tracked_state_indices = None
 
-        # Previous control for warm-starting
-        self.u_prev = 0.0
+        # Previous control for warm-starting (ones for multi-control since
+        # multipliers default to 1.0; zero for legacy single-control)
+        self.u_prev = np.ones(n_controls) if n_controls > 1 else 0.0
         self.u_guess = None
 
-    def _ode_dynamics(self, x: np.ndarray, u: float) -> np.ndarray:
+    def _ode_dynamics(self, x: np.ndarray, u) -> np.ndarray:
         """Evaluate ODE dynamics: dx/dt = f(x, u)
 
         Uses generic control interface: passes control to ODE.forward().
 
         Args:
             x: State vector
-            u: Control input (scalar or vector)
+            u: Control input (scalar or array)
 
         Returns:
             State derivative
@@ -186,11 +193,10 @@ class MPCController:
         x_torch = torch.tensor(x, dtype=torch.float32)
 
         # Convert control to tensor
-        # For single control, u is scalar; for multiple controls, u is array
-        if self.n_controls == 1:
+        if np.isscalar(u):
             u_torch = torch.tensor([u], dtype=torch.float32)
         else:
-            u_torch = torch.tensor(u, dtype=torch.float32)
+            u_torch = torch.tensor(np.asarray(u), dtype=torch.float32)
 
         with torch.no_grad():
             # Get dynamics with control
@@ -202,43 +208,52 @@ class MPCController:
 
         return dx
 
-    def _rk4_step(self, x: np.ndarray, u: float, dt: float) -> np.ndarray:
-        """RK4 integration step.
+    def _rk4_step(self, x: np.ndarray, u, dt: float) -> np.ndarray:
+        """RK4 integration step with optional sub-stepping.
+
+        Control is held constant over the full dt interval.
+        Integration is split into `integration_substeps` RK4 steps
+        for numerical stability.
 
         Args:
             x: Current state
-            u: Control input
+            u: Control input (scalar or array)
             dt: Time step
 
         Returns:
             Next state
         """
-        k1 = self._ode_dynamics(x, u)
-        k2 = self._ode_dynamics(x + 0.5 * dt * k1, u)
-        k3 = self._ode_dynamics(x + 0.5 * dt * k2, u)
-        k4 = self._ode_dynamics(x + dt * k3, u)
-        return x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        n_sub = self.config.integration_substeps
+        sub_dt = dt / n_sub
+        for _ in range(n_sub):
+            k1 = self._ode_dynamics(x, u)
+            k2 = self._ode_dynamics(x + 0.5 * sub_dt * k1, u)
+            k3 = self._ode_dynamics(x + 0.5 * sub_dt * k2, u)
+            k4 = self._ode_dynamics(x + sub_dt * k3, u)
+            x = x + (sub_dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        return x
 
     def _mpc_objective(self, u_seq: np.ndarray, x0: np.ndarray) -> float:
         """MPC cost function.
 
         Args:
-            u_seq: Control sequence (flattened)
+            u_seq: Control sequence (flattened, length N * n_controls)
             x0: Initial state
 
         Returns:
             Total cost
         """
         N = self.config.prediction_horizon
+        nc = self.n_controls
         dt = self.config.dt
 
-        u_seq = u_seq.reshape(N)
+        u_seq = u_seq.reshape(N, nc)
 
         cost = 0.0
         x_curr = x0.copy()
 
         for k in range(N):
-            u_k = u_seq[k]
+            u_k = u_seq[k] if nc > 1 else u_seq[k, 0]
 
             # Predict next state
             x_next = self._rk4_step(x_curr, u_k, dt)
@@ -288,19 +303,20 @@ class MPCController:
                     state_cost = error.T @ self.Q @ error
 
                 # Control magnitude cost
+                u_k_arr = np.atleast_1d(u_k)
                 if self.cost_type == 'l1':
-                    control_magnitude_cost = self.Ru * np.abs(u_k)  # |u|
+                    control_magnitude_cost = self.Ru * np.sum(np.abs(u_k_arr))
                 else:
-                    control_magnitude_cost = self.Ru * (u_k**2)  # u²
+                    control_magnitude_cost = self.Ru * np.sum(u_k_arr**2)
 
                 stage_cost = state_cost + control_magnitude_cost
 
             # Control rate-of-change cost (always applied for smoothness)
             if k == 0:
-                du = u_k - self.u_prev
+                du = u_seq[k] - self.u_prev
             else:
-                du = u_k - u_seq[k-1]
-            control_change_cost = self.R_deltau * (du**2)
+                du = u_seq[k] - u_seq[k-1]
+            control_change_cost = self.R_deltau * np.sum(du**2)
 
             cost += stage_cost + control_change_cost
 
@@ -315,18 +331,19 @@ class MPCController:
             x_current: Current state
 
         Returns:
-            Control input to apply
+            Control input to apply (shape: (n_controls,))
             Info dictionary
         """
         N = self.config.prediction_horizon
+        nc = self.n_controls
         x0_np = x_current.detach().numpy()
 
-        # Initial guess
+        # Initial guess (N * nc decision variables)
         if self.u_guess is None or not self.config.warm_start:
-            self.u_guess = np.ones(N)
+            self.u_guess = np.ones(N * nc)
 
-        # Bounds
-        bounds = [(self.config.u_min, self.config.u_max) for _ in range(N)]
+        # Bounds for each decision variable
+        bounds = [(self.config.u_min, self.config.u_max) for _ in range(N * nc)]
 
         # Optimize
         if self.config.solver == 'ipopt':
@@ -358,13 +375,14 @@ class MPCController:
                 }
             )
 
-        u_optimal = res.x
-        u_control = u_optimal[0]
+        u_optimal = res.x.reshape(N, nc)
+        u_control = u_optimal[0]  # First timestep control (shape: (nc,))
 
-        # Update for next iteration
-        self.u_prev = u_control
-        self.u_guess = np.roll(u_optimal, -1)
-        self.u_guess[-1] = u_optimal[-1]
+        # Update for next iteration (warm start: shift sequence by one timestep)
+        self.u_prev = u_control.copy()
+        u_shifted = np.roll(u_optimal, -1, axis=0)
+        u_shifted[-1] = u_optimal[-1]
+        self.u_guess = u_shifted.flatten()
 
         info = {
             'success': res.success,
@@ -373,7 +391,7 @@ class MPCController:
             'nit': res.nit,
         }
 
-        return torch.tensor([u_control], dtype=torch.float32), info
+        return torch.tensor(u_control, dtype=torch.float32), info
 
 
 def simulate_mpc(
@@ -409,10 +427,17 @@ def simulate_mpc(
         u_mpc, info = mpc_controller.step(x_current)
         controls.append(u_mpc.numpy())
 
+        if step < 3:
+            print(f"  Step {step}: state={x_current.tolist()}, u={u_mpc.tolist()}, "
+                  f"cost={info['cost']:.6f}, nit={info['nit']}, success={info['success']}")
+
         # Apply control and simulate one step
         x_current_np = x_current.detach().numpy()
-        u_scalar = float(u_mpc[0])
-        x_next_np = mpc_controller._rk4_step(x_current_np, u_scalar, dt)
+        if mpc_controller.n_controls == 1:
+            u_apply = float(u_mpc[0])
+        else:
+            u_apply = u_mpc.numpy()
+        x_next_np = mpc_controller._rk4_step(x_current_np, u_apply, dt)
         x_current = torch.tensor(x_next_np, dtype=torch.float32)
 
         times.append(times[-1] + dt)

@@ -246,8 +246,9 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
         n_states = states.shape[1]
         n_controls = controls.shape[1] if len(controls.shape) > 1 else 1
 
-        fig, axes = plt.subplots(n_states + 1, 1, figsize=(10, 3 * (n_states + 1)))
-        if n_states == 1:
+        n_rows = n_states + n_controls
+        fig, axes = plt.subplots(n_rows, 1, figsize=(10, 3 * n_rows))
+        if n_rows == 2:
             axes = [axes[0], axes[1]]
 
         # Plot states
@@ -263,8 +264,7 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
             ax.spines['right'].set_visible(False)
             ax.spines['top'].set_visible(False)
 
-        # Plot control (raw and clamped)
-        ax = axes[-1]
+        # Plot controls - one subplot per control signal
         control_times = times[:-1]  # Control is one step shorter
 
         # Get control bounds from config if available
@@ -276,42 +276,37 @@ def analyze_training(config, history, exp_path, plot_training, plot_trajectories
             except:
                 pass
 
-        if n_controls == 1:
+        for i in range(n_controls):
+            ax = axes[n_states + i]
+            ctrl_name = control_names[i] if i < len(control_names) else f'u{i}'
+
+            if n_controls == 1:
+                ctrl_data = controls.flatten() if len(controls.shape) > 1 else controls
+            else:
+                ctrl_data = controls[:, i]
+
             # Plot raw controller output
-            ax.plot(control_times, controls, 'g--', linewidth=2, alpha=0.6,
-                   label=f'{control_names[0]} (raw)')
+            ax.plot(control_times, ctrl_data, 'g--', linewidth=2, alpha=0.6,
+                   label=f'{ctrl_name} (raw)')
 
             # Plot clamped control if bounds are available
             if control_bounds is not None:
-                controls_clamped = np.clip(controls, control_bounds[0], control_bounds[1])
+                controls_clamped = np.clip(ctrl_data, control_bounds[0], control_bounds[1])
                 ax.plot(control_times, controls_clamped, 'g-', linewidth=2,
-                       label=f'{control_names[0]} (clamped)')
-
-                # Add horizontal lines for bounds
+                       label=f'{ctrl_name} (clamped)')
                 ax.axhline(control_bounds[0], color='r', linestyle=':', alpha=0.5,
-                          label=f'lower bound ({control_bounds[0]})')
+                          label=f'bound ({control_bounds[0]})')
                 ax.axhline(control_bounds[1], color='r', linestyle=':', alpha=0.5,
-                          label=f'upper bound ({control_bounds[1]})')
-        else:
-            for i in range(n_controls):
-                # Plot raw controller output
-                ax.plot(control_times, controls[:, i], linewidth=2, alpha=0.6, linestyle='--',
-                       label=f'{control_names[i] if i < len(control_names) else f"u{i}"} (raw)')
+                          label=f'bound ({control_bounds[1]})')
 
-                # Plot clamped control if bounds are available
-                if control_bounds is not None:
-                    controls_clamped = np.clip(controls[:, i], control_bounds[0], control_bounds[1])
-                    ax.plot(control_times, controls_clamped, linewidth=2,
-                           label=f'{control_names[i] if i < len(control_names) else f"u{i}"} (clamped)')
-
-        ax.axhline(0.0, color='k', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Control')
-        ax.set_title('Controller Output (Raw MLP output vs Clamped)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.spines['right'].set_visible(False)
-        ax.spines['top'].set_visible(False)
+            ax.axhline(0.0, color='k', linestyle='--', alpha=0.3)
+            ax.set_xlabel('Time')
+            ax.set_ylabel(ctrl_name)
+            ax.set_title(f'{ctrl_name} (Controller Output)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.spines['right'].set_visible(False)
+            ax.spines['top'].set_visible(False)
 
         plt.tight_layout()
 
@@ -545,8 +540,9 @@ def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True, plot_state_spa
         n_states = states.shape[1]
         n_controls = controls.shape[1] if len(controls.shape) > 1 else 1
 
-        fig, axes = plt.subplots(n_states + 1, 1, figsize=(10, 3 * (n_states + 1)))
-        if n_states == 1:
+        n_rows = n_states + n_controls
+        fig, axes = plt.subplots(n_rows, 1, figsize=(10, 3 * n_rows))
+        if n_rows == 2:
             axes = [axes[0], axes[1]]
 
         # Plot states
@@ -564,23 +560,35 @@ def analyze_mpc(config, mpc_data, exp_path, plot_trajectory=True, plot_state_spa
             ax.spines['right'].set_visible(False)
             ax.spines['top'].set_visible(False)
 
-        # Plot control
-        ax = axes[-1]
+        # Plot controls - one subplot per control signal
         control_times = times[:-1]  # Control is one step shorter
-        if n_controls == 1:
-            ax.plot(control_times, controls, 'g-', linewidth=2, label=control_names[0])
-        else:
-            for i in range(n_controls):
-                ax.plot(control_times, controls[:, i], linewidth=2,
-                       label=control_names[i] if i < len(control_names) else f'u{i}')
-        ax.axhline(0.0, color='k', linestyle='--', alpha=0.3)
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Control')
-        ax.set_title('MPC Control Input')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.spines['right'].set_visible(False)
-        ax.spines['top'].set_visible(False)
+
+        # Get control bounds from config
+        u_min = config.get('u_min', None)
+        u_max = config.get('u_max', None)
+
+        for i in range(n_controls):
+            ax = axes[n_states + i]
+            ctrl_name = control_names[i] if i < len(control_names) else f'u{i}'
+
+            if n_controls == 1:
+                ctrl_data = controls.flatten() if len(controls.shape) > 1 else controls
+            else:
+                ctrl_data = controls[:, i]
+
+            ax.plot(control_times, ctrl_data, linewidth=2, label=ctrl_name)
+
+            if u_min is not None and u_max is not None:
+                ax.axhline(u_min, color='r', linestyle=':', alpha=0.5, label=f'bound ({u_min})')
+                ax.axhline(u_max, color='r', linestyle=':', alpha=0.5, label=f'bound ({u_max})')
+
+            ax.set_xlabel('Time')
+            ax.set_ylabel(ctrl_name)
+            ax.set_title(f'{ctrl_name} (MPC Control)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.spines['right'].set_visible(False)
+            ax.spines['top'].set_visible(False)
 
         plt.tight_layout()
 
