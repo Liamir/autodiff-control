@@ -72,6 +72,7 @@ autodiff-control/
 │   └── utils/
 │       ├── plotting.py           # Visualization utilities
 │       └── logging.py            # Experiment logging (full precision)
+├── plots/                        # Generated plots and figures
 └── logs/                         # Experiment outputs (auto-generated)
     └── experiment_name_timestamp/
         ├── config.json           # Full configuration (includes model params)
