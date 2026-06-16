@@ -40,6 +40,7 @@ class MPCConfig:
         solver: str = 'slsqp',
         warm_start: bool = True,
         integration_substeps: int = 1,
+        integration_method: str = 'rk4',
     ):
         """Initialize MPC configuration.
 
@@ -66,6 +67,9 @@ class MPCConfig:
                                   Higher values improve integration accuracy without adding
                                   decision variables. Use when dt is too coarse for stable
                                   integration but the control grid is fine.
+            integration_method: Integration method for the inner ODE ('rk4' or 'scipy').
+                                 Use 'scipy' for stiff systems — it uses LSODA via
+                                 scipy.integrate.odeint, which handles stiff ODEs robustly.
         """
         self.prediction_horizon = prediction_horizon
         self.dt = dt
@@ -84,6 +88,7 @@ class MPCConfig:
         self.solver = solver.lower()
         self.warm_start = warm_start
         self.integration_substeps = integration_substeps
+        self.integration_method = integration_method
 
 
 class MPCController:
@@ -209,20 +214,9 @@ class MPCController:
         return dx
 
     def _rk4_step(self, x: np.ndarray, u, dt: float) -> np.ndarray:
-        """RK4 integration step with optional sub-stepping.
-
-        Control is held constant over the full dt interval.
-        Integration is split into `integration_substeps` RK4 steps
-        for numerical stability.
-
-        Args:
-            x: Current state
-            u: Control input (scalar or array)
-            dt: Time step
-
-        Returns:
-            Next state
-        """
+        """Integrate one control interval, dispatching to RK4 or scipy."""
+        if self.config.integration_method == 'scipy':
+            return self._scipy_step(x, u, dt)
         n_sub = self.config.integration_substeps
         sub_dt = dt / n_sub
         for _ in range(n_sub):
@@ -232,6 +226,22 @@ class MPCController:
             k4 = self._ode_dynamics(x + sub_dt * k3, u)
             x = x + (sub_dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
         return x
+
+    def _scipy_step(self, x: np.ndarray, u, dt: float) -> np.ndarray:
+        """Integrate one control interval with scipy.integrate.odeint (LSODA).
+
+        LSODA automatically switches between stiff and non-stiff methods,
+        making it suitable for systems with fast and slow timescales.
+        mxstep is set high to handle systems with very different timescales
+        (e.g., stiffness ratio ~1000).
+        """
+        from scipy.integrate import odeint
+
+        def rhs(y, t):
+            return self._ode_dynamics(y, u)
+
+        sol = odeint(rhs, x, [0.0, dt], rtol=1e-6, atol=1e-8, mxstep=5000)
+        return sol[-1]
 
     def _mpc_objective(self, u_seq: np.ndarray, x0: np.ndarray) -> float:
         """MPC cost function.
