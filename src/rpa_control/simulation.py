@@ -4,12 +4,15 @@ import matplotlib.pyplot as plt
 
 
 def simulate_rpa_on_off(model, parameter_name, on_value, off_value, t_on, t_off,
-                        y0=None, rtol=1e-8, atol=1e-10):
+                        y0=None, rtol=1e-8, atol=1e-10, plot=True):
     """
     Simulate one on→off treatment cycle for an RPAModel or ABCModel.
 
     If y0 is None the analytical SS at off_value is used (RPAModel only).
     Pass y0 explicitly for models without an analytic SS (e.g. ABCModel).
+
+    Set plot=False to skip the default per-variable figure (e.g. when the
+    caller wants to build its own custom plot from the returned solutions).
 
     Returns
     -------
@@ -31,6 +34,9 @@ def simulate_rpa_on_off(model, parameter_name, on_value, off_value, t_on, t_off,
                         (0, t_on), y0, **kw)
     sol_off = solve_ivp(model.get_f({parameter_name: off_value}),
                         (0, t_off), sol_on.y[:, -1], **kw)
+
+    if not plot:
+        return sol_on, sol_off
 
     t_all = np.concatenate([sol_on.t, sol_off.t + t_on])
     y_all = np.concatenate([sol_on.y, sol_off.y], axis=1)
@@ -65,12 +71,15 @@ def simulate_rpa_on_off(model, parameter_name, on_value, off_value, t_on, t_off,
 
 def simulate_rpa_intermittent(model, parameter_name, on_value, off_value,
                                t_on, t_off, n_cycles,
-                               y0=None, rtol=1e-8, atol=1e-10):
+                               y0=None, rtol=1e-8, atol=1e-10, plot=True):
     """
     Simulate intermittent (periodic) treatment for an RPAModel or ABCModel.
 
     If y0 is None the analytical SS at off_value is used (RPAModel only).
     Pass y0 explicitly for models without an analytic SS (e.g. ABCModel).
+
+    Set plot=False to skip the default per-variable figure (e.g. when the
+    caller wants to build its own custom plot from the returned trajectory).
 
     Returns
     -------
@@ -107,6 +116,9 @@ def simulate_rpa_intermittent(model, parameter_name, on_value, off_value,
     t_all = np.concatenate(t_segs)
     y_all = np.concatenate(y_segs, axis=1)
 
+    if not plot:
+        return t_all, y_all
+
     ON_COLOR = 'lightgray'
     on_ranges = [(c * (t_on + t_off), c * (t_on + t_off) + t_on)
                  for c in range(n_cycles)]
@@ -137,6 +149,70 @@ def simulate_rpa_intermittent(model, parameter_name, on_value, off_value,
     plt.tight_layout()
     plt.show()
     return t_all, y_all
+
+
+def simulate_threshold_driven(model, parameter_name, on_value, off_value,
+                              burden_fn, off_frac, on_frac, T_horizon, y0,
+                              rtol=1e-8, atol=1e-10, max_step=0.5):
+    """
+    Simulate burden-threshold-driven (PSA-style) adaptive treatment: start
+    with treatment ON; switch OFF once burden_fn(y) drops to off_frac times
+    its initial value; switch back ON once it regrows to on_frac times its
+    initial value (repeat until T_horizon). Mimics clinical adaptive-therapy
+    protocols that react to a measurable tumor-burden proxy (e.g. PSA)
+    rather than to the underlying fast homeostatic dynamics.
+
+    burden_fn(y) -> scalar burden metric, e.g. lambda y: y[2] + y[3] for a
+    two-clone model's total tumor size.
+
+    Returns
+    -------
+    t_all, y_all : concatenated trajectory (as in simulate_rpa_intermittent)
+    on_ranges    : list of (t_start, t_end) treatment-on intervals actually
+                   realised (durations are determined by the dynamics, not
+                   fixed in advance)
+    """
+    y0 = np.asarray(y0, dtype=float)
+    baseline      = burden_fn(y0)
+    off_threshold = off_frac * baseline
+    on_threshold  = on_frac  * baseline
+
+    f_on  = model.get_f({parameter_name: on_value})
+    f_off = model.get_f({parameter_name: off_value})
+
+    def event_off(t, y):
+        return burden_fn(y) - off_threshold
+    event_off.terminal  = True
+    event_off.direction = -1
+
+    def event_on(t, y):
+        return burden_fn(y) - on_threshold
+    event_on.terminal  = True
+    event_on.direction = 1
+
+    t_cur, y_cur, treatment_on = 0.0, y0.copy(), True
+    t_segs, y_segs, on_ranges  = [], [], []
+
+    while t_cur < T_horizon - 1e-9:
+        f_cur = f_on if treatment_on else f_off
+        event = event_off if treatment_on else event_on
+        sol = solve_ivp(f_cur, (0, T_horizon - t_cur), y_cur, events=event,
+                        max_step=max_step, rtol=rtol, atol=atol)
+        assert sol.success, f"integration failed: {sol.message}"
+        seg_t = sol.t + t_cur
+        t_segs.append(seg_t)
+        y_segs.append(sol.y)
+        seg_end = seg_t[-1]
+        if treatment_on:
+            on_ranges.append((t_cur, seg_end))
+        t_cur, y_cur = seg_end, sol.y[:, -1]
+        if sol.t_events[0].size == 0:
+            break   # reached T_horizon without another threshold crossing
+        treatment_on = not treatment_on
+
+    t_all = np.concatenate(t_segs)
+    y_all = np.concatenate(y_segs, axis=1)
+    return t_all, y_all, on_ranges
 
 
 def validate_rpa_params(model, scale=2.0, t_end=500, ss_tol=1e-2,
@@ -276,12 +352,16 @@ def stepped_trajectory(model, param, values, durations, dt=0.2, y0=None):
 
     # state variables
     for i, (ax, vname) in enumerate(zip(axes[1:], model.state_vars)):
+        # print(f"Plotting {vname} with color C{i % 10}")
         ax.plot(t_all, y_all[i], color=f'C{i % 10}', lw=1.5)
         for t_s in step_starts[1:]:
             ax.axvline(t_s, color='grey', ls=':', lw=0.8)
         ax.set_ylabel(vname, fontsize=8)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        if vname == 'Cancer':
+            # make the y-axis log-scale
+            ax.set_yscale('log')
 
     axes[-1].set_xlabel('time')
     axes[0].set_title(f'Model {model.name}  |  stepped {param}', fontsize=9)

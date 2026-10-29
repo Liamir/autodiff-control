@@ -140,10 +140,13 @@ Input_sym = symbols('Input', positive=True)
 c1_cancer = 0.05
 c2_cancer = 1.0
 
-def make_cancer_f(oidx, c1=c1_cancer, c2=c2_cancer):
+def make_cancer_f(oidx, c1=c1_cancer, c2=c2_cancer, decay_below=True):
     """Return extra_f for Cancer given the output variable index oidx."""
     def cancer_f(t, y, O_star):
-        return [y[-1] * (c1 - c2 * max(y[oidx] - O_star, 0.0))]
+        if decay_below:
+            return [y[-1] * (c1 - c2 * max(O_star - y[oidx], 0.0))]
+        else: # decay when output is above O*, e.g. for IFFL
+            return [y[-1] * (c1 - c2 * max(y[oidx] - O_star, 0.0))]
     return cancer_f
 
 
@@ -268,16 +271,28 @@ A_sym               = symbols('A',               positive=True)
 alpha, beta1, beta2 = symbols('alpha beta1 beta2', positive=True)
 mu_sym              = symbols('mu',              positive=True)
 
+# model_if = RPAModel(
+#     name='IF',
+#     state_vars=['A', 'B'],
+#     output_var='B',
+#     params_base=dict(mu=1.0, alpha=10.0, beta1=10.0, beta2=1.0),
+#     equations=[
+#         alpha * (mu_sym - B),
+#         beta1 * A_sym - beta2 * B,
+#     ],
+#     extra_vars=['Cancer'], extra_f=make_cancer_f(1, c2=100.0),
+# )
+
 model_if = RPAModel(
     name='IF',
     state_vars=['A', 'B'],
     output_var='B',
-    params_base=dict(mu=1.0, alpha=10.0, beta1=10.0, beta2=1.0),
+    params_base=dict(mu=1.0, alpha=1.0, beta1=1.0, beta2=1.0),
     equations=[
         alpha * (mu_sym - B),
         beta1 * A_sym - beta2 * B,
     ],
-    extra_vars=['Cancer'], extra_f=make_cancer_f(1),
+    extra_vars=['Cancer'], extra_f=make_cancer_f(1, decay_below=True),
 )
 
 # ── IFFL model ────────────────────────────────────────────────────────────────
@@ -334,3 +349,155 @@ class ABCModel:
 
 
 model_abc = ABCModel()
+
+
+# ── Bare AB homeostatic pair (no tumor) ───────────────────────────────────────
+class ABModel:
+    """
+    Just the A, B homeostatic pair -- no tumor variable. Unlike ABCModel,
+    a1/b2/mu/b1 are instance attributes (defaulting to the module-level
+    values above), so different AB parameterizations can be explored side
+    by side. Compatible with simulate_rpa_on_off / simulate_rpa_intermittent.
+
+    The only supported parameter_name is 'b1'.
+    """
+    name       = 'AB'
+    state_vars = ['A', 'B']
+
+    def __init__(self, a1=a1, b2=b2, mu=mu, b1=b1):
+        self.a1 = a1
+        self.b2 = b2
+        self.mu = mu
+        self.b1 = b1
+
+    def steady_state(self, b1_val=None):
+        """Off-treatment (or given b1_val) fixed point [A*, B*]."""
+        b1_val = self.b1 if b1_val is None else b1_val
+        return np.array([self.b2 * self.mu / b1_val, self.mu])
+
+    def get_f(self, overrides=None):
+        b1_val = overrides.get('b1', self.b1) if overrides else self.b1
+        a1_, b2_, mu_ = self.a1, self.b2, self.mu
+
+        def f(t, y):
+            A, B = y
+            return [a1_ * (mu_ - B), b1_val * A - b2_ * B]
+        return f
+
+
+# ── ABC model + two-clone competition (clonal selection) ─────────────────────
+def abc_clonal_rhs(t, y, b1_val, r_s, r_r, carrying_capacity, cr_sensitivity=0.0, c2=_c2):
+    """ABC homeostatic pair (A, B) driving therapy-induced decay of a
+    drug-sensitive clone Cs, which competes logistically for one carrying
+    capacity against a resistant clone Cr.
+
+    cr_sensitivity in [0, 1] sets how much of Cs's kill rate still applies to
+    Cr: 0 = fully resistant/immune (Cr never killed), values in (0,1) =
+    partial resistance (Cr is still killed, just less efficiently than Cs).
+    c2 sets the overall kill strength (shrinkage rate); defaults to the
+    module-level base value."""
+    A, _B, Cs, Cr = y
+    dA = a1 * (mu - _B)
+    dB = b1_val * A - b2 * _B
+
+    kill = c2 * max(mu - _B, 0.0)
+    growth_factor = 1 - (Cs + Cr) / carrying_capacity
+    dCs = r_s * Cs * growth_factor - kill * Cs
+    dCr = r_r * Cr * growth_factor - cr_sensitivity * kill * Cr
+    return [dA, dB, dCs, dCr]
+
+
+class ABCClonalModel:
+    """
+    ABC timescale-separation model (see ABCModel) combined with two-clone
+    logistic competition (see SI_strategies_with_clonal_selection.ipynb):
+    the sensitive clone Cs is killed at full strength while B is suppressed,
+    the resistant clone Cr at a reduced strength set by cr_sensitivity
+    (0 = fully resistant, as originally implemented), and Cs, Cr compete for
+    one shared carrying capacity. Sparing some Cs by pulsing treatment
+    (instead of dosing continuously) lets it keep competitively suppressing
+    Cr, delaying resistant takeover.
+
+    The only supported parameter_name is 'b1'. Pass y0 explicitly when calling
+    simulate_rpa_on_off / simulate_rpa_intermittent (Cs, Cr have no finite
+    steady state).
+    """
+    name       = 'ABC+clonal'
+    state_vars = ['A', 'B', 'Cs', 'Cr']
+
+    def __init__(self, r_s=0.5, r_r=0.2, carrying_capacity=1000.0, cr_sensitivity=0.0, c2=_c2):
+        self.r_s = r_s
+        self.r_r = r_r
+        self.carrying_capacity = carrying_capacity
+        self.cr_sensitivity = cr_sensitivity
+        self.c2 = c2
+
+    def get_f(self, overrides=None):
+        b1_val = overrides.get('b1', b1) if overrides else b1
+        return lambda t, y: abc_clonal_rhs(t, y, b1_val, self.r_s, self.r_r,
+                                           self.carrying_capacity, self.cr_sensitivity,
+                                           self.c2)
+
+
+model_abc_clonal = ABCClonalModel()
+
+
+# ── Feedback wrapper (purely numerical) ──────────────────────────────────────
+class FeedbackModel:
+    """
+    Wraps an existing model (RPAModel, ABCModel, ...), adding a linear
+    feedback term  sign * coeff * y[feedback_var]  into target_var's
+    derivative. Purely numerical: base_model.get_f() is called as-is and the
+    feedback term is added to the returned derivative vector, so no sympy
+    solve/lambdify is involved and the base model is left untouched.
+
+    No analytic steady state is available (there is no self._ss_dict).
+    rpa_params defaults to the base model's list, since the feedback term
+    only affects the returned derivative -- not the analytic homeostatic
+    fixed point, which is unaffected as long as target_var's own equation
+    doesn't define the output's steady state (verify per case, e.g. with
+    simulation.classify_rpa_params, rather than assuming it always holds).
+
+    coeff_name is added to params_base (default coeff_val), so the feedback
+    strength can be swept without rebuilding the model -- either via
+    get_f(overrides={coeff_name: ...}) or by mutating params_base directly.
+    """
+
+    def __init__(self, base_model, target_var, feedback_var,
+                 coeff_name='b_fb', sign=1.0, coeff_val=0.5, rpa_params=None):
+        self.base_model  = base_model
+        self.name        = f'{base_model.name}+fb({feedback_var}->{target_var})'
+        self.state_vars  = list(base_model.state_vars)
+        self.output_var  = base_model.output_var
+        self.output_idx  = base_model.output_idx
+        self._extra_vars = list(getattr(base_model, '_extra_vars', []))
+        self.params_base = {**base_model.params_base, coeff_name: coeff_val}
+        self.rpa_params  = (list(rpa_params) if rpa_params is not None
+                            else list(base_model.rpa_params))
+
+        self._target_idx   = self.state_vars.index(target_var)
+        self._feedback_idx = self.state_vars.index(feedback_var)
+        self._coeff_name   = coeff_name
+        self._sign         = sign
+
+    def get_f(self, overrides=None):
+        p = dict(self.params_base)
+        if overrides:
+            p.update(overrides)
+        coeff       = p.pop(self._coeff_name)
+        base_kwargs = {k: v for k, v in p.items() if k in self.base_model.params_base}
+        f_base      = self.base_model.get_f(base_kwargs)
+        ti, fi, sign = self._target_idx, self._feedback_idx, self._sign
+
+        def f(t, y):
+            dy      = list(f_base(t, y))
+            dy[ti] += sign * coeff * y[fi]
+            return dy
+        return f
+
+
+# ── ABC feedback configs (Cancer -> A or B, positive or negative) ───────────
+model_abc_fbA_pos = FeedbackModel(model_if, target_var='A', feedback_var='Cancer', coeff_name='b3', sign=+1.0)
+model_abc_fbA_neg = FeedbackModel(model_if, target_var='A', feedback_var='Cancer', coeff_name='b3', sign=-1.0)
+model_abc_fbB_pos = FeedbackModel(model_if, target_var='B', feedback_var='Cancer', coeff_name='b3', sign=+1.0)
+model_abc_fbB_neg = FeedbackModel(model_if, target_var='B', feedback_var='Cancer', coeff_name='b3', sign=-1.0)

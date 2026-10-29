@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from scipy.integrate import solve_ivp
 
 
 class SeparationOfTimescalesStrategy:
@@ -50,10 +51,26 @@ class SeparationOfTimescalesStrategy:
         p = dict(self.baseline)
         if overrides:
             p.update(overrides)
-        subs = {sym: p[name]
-                for name, sym in zip(self.model._param_names, self.model._sym_params)}
-        return np.array([float(self.model._ss_dict[s].subs(subs))
-                         for s in self.model._sym_state])
+        if hasattr(self.model, '_ss_dict'):
+            subs = {sym: p[name]
+                    for name, sym in zip(self.model._param_names, self.model._sym_params)}
+            return np.array([float(self.model._ss_dict[s].subs(subs))
+                             for s in self.model._sym_state])
+        return self._numeric_ss(p)
+
+    def _numeric_ss(self, params, t_settle=500):
+        """
+        Fallback for models without an analytic _ss_dict (e.g. FeedbackModel):
+        integrate get_f() to convergence. Extra vars (e.g. Cancer) start at 0,
+        which is already a fixed point of their own dynamics, so this
+        reproduces the no-disease baseline exactly.
+        """
+        n_extra = len(getattr(self.model, '_extra_vars', []))
+        n_base  = len(self.model.state_vars) - n_extra
+        y0      = np.concatenate([np.full(n_base, 0.5), np.zeros(n_extra)])
+        sol = solve_ivp(self.model.get_f(params), (0, t_settle), y0,
+                        method='Radau', rtol=1e-10, atol=1e-12)
+        return sol.y[:, -1]
 
     def _init_y0(self, overrides=None):
         """SS with extra vars (e.g. Cancer) initialized to 1.0."""
